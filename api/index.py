@@ -1,28 +1,21 @@
 # api/index.py
-from fastapi import FastAPI
-from pydantic import BaseModel
-from fastapi.middleware.cors import CORSMiddleware
+from http.server import BaseHTTPRequestHandler
+import json
 
-# This is the main application object that Vercel will find and run.
-app = FastAPI()
+# Vercel looks for a class named 'handler' that inherits from BaseHTTPRequestHandler.
+# This is the most basic way to create a serverless function.
+class handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        # Send a success response code
+        self.send_response(200)
 
-# This adds the security middleware that allows your frontend to talk to the backend.
-# This was missing in some previous versions and is critical.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+        # Set the content type to application/json
+        self.send_header('Content-type', 'application/json')
+        self.end_headers()
 
-# This defines the data structure we expect from the frontend.
-class ChatQuery(BaseModel):
-    query: str
+        # Create the success message
+        response_data = {"answer": "Success! The basic Python server is working."}
 
-# This is the endpoint that will handle the chat requests.
-@app.post("/api/chat")
-async def handle_chat(chat_query: ChatQuery):
-    user_message = chat_query.query
-    ai_response = f"Success! The backend is connected and received: '{user_message}'"
-    return {"answer": ai_response}
+        # Write the response back to the browser
+        self.wfile.write(json.dumps(response_data).encode('utf-8'))
+        return
