@@ -1,21 +1,29 @@
-# api/index.py
-from http.server import BaseHTTPRequestHandler
-import json
+# backend/api/index.py
+from fastapi import FastAPI
+from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
 
-# Vercel looks for a class named 'handler' that inherits from BaseHTTPRequestHandler.
-# This is the most basic way to create a serverless function.
-class handler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        # Send a success response code
-        self.send_response(200)
+# Create the main FastAPI application
+app = FastAPI()
 
-        # Set the content type to application/json
-        self.send_header('Content-type', 'application/json')
-        self.end_headers()
+# This is the crucial security middleware that was missing.
+# It tells the server to accept requests from any other website.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods
+    allow_headers=["*"],  # Allows all headers
+)
 
-        # Create the success message
-        response_data = {"answer": "Success! The basic Python server is working."}
+# This defines the data structure we expect from the frontend
+class ChatQuery(BaseModel):
+    query: str
 
-        # Write the response back to the browser
-        self.wfile.write(json.dumps(response_data).encode('utf-8'))
-        return
+# This is our main chat endpoint that listens for POST requests
+@app.post("/api/chat")
+async def handle_chat(chat_query: ChatQuery):
+    user_message = chat_query.query
+    # This is the success response we want to see
+    ai_response = f"Success! The backend is connected and received: '{user_message}'"
+    return {"answer": ai_response}
