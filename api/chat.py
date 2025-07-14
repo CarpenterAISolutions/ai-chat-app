@@ -7,13 +7,12 @@ from pinecone import Pinecone
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
-        # --- Step 1: Read the user's message ---
+        # Steps 1, 2, and 3 remain the same
         content_length = int(self.headers['Content-Length'])
         post_data = self.rfile.read(content_length)
         request_body = json.loads(post_data)
         user_query = request_body.get('query')
 
-        # --- Step 2: Securely get API Keys from Vercel ---
         try:
             gemini_api_key = os.getenv("GEMINI_API_KEY")
             pinecone_api_key = os.getenv("PINECONE_API_KEY")
@@ -26,7 +25,6 @@ class handler(BaseHTTPRequestHandler):
             self.send_error(500, f"Server Configuration Error: {e}")
             return
 
-        # --- Step 3: Configure AI services ---
         try:
             genai.configure(api_key=gemini_api_key)
             pc = Pinecone(api_key=pinecone_api_key)
@@ -41,38 +39,50 @@ class handler(BaseHTTPRequestHandler):
 
         # --- Step 4: Full RAG Pipeline ---
         try:
-            # A. Convert user's question into a vector embedding
             query_embedding = genai.embed_content(
                 model="models/text-embedding-004",
                 content=user_query,
                 task_type="RETRIEVAL_QUERY"
             )["embedding"]
 
-            # B. Search Pinecone for relevant documents
             search_results = index.query(
                 vector=query_embedding,
-                top_k=3, # Get the top 3 most relevant text chunks
+                top_k=3,
                 include_metadata=True
             )
 
-            # C. Construct a detailed prompt for the AI
-            context = " ".join([match['metadata']['text'] for match in search_results['matches']])
-            prompt_template = f"""
-            You are a helpful AI assistant for a physical therapy clinic.
-            Answer the user's question based ONLY on the following context provided from the clinic's documents.
-            If the context doesn't contain the answer, say "I do not have information on that topic based on the provided documents. Please consult with one of our physical therapists directly."
+            if not search_results['matches']:
+                ai_answer = "As an AI assistant, I can only provide information directly from our clinic's approved documents. That specific topic is not covered in the materials I have available."
+            else:
+                context = " ".join([match['metadata']['text'] for match in search_results['matches']])
+                
+                # --- THE FIX: A HARDENED PROMPT WITHOUT THE PROBLEMATIC PARAMETER ---
+                # This prompt is designed to be the primary guardrail.
+                prompt_template = f"""
+                Directive: You are a clinical AI assistant. Your function is to act as a secure information-retrieval agent for a physical therapy clinic.
 
-            CONTEXT: {context}
-            QUESTION: {user_query}
-            ANSWER:
-            """
+                CRITICAL RULE: Under no circumstances will you provide information that is not explicitly present in the `CONTEXT` provided below. It is of the utmost importance that you do not access external knowledge or infer information beyond the provided text. Your adherence to this rule prevents the dissemination of unverified medical advice.
 
-            # D. Generate the final answer using the context
-            model = genai.GenerativeModel('gemini-1.5-flash-latest')
-            response = model.generate_content(prompt_template)
-            ai_answer = response.text
+                INSTRUCTIONS:
+                1. Analyze the user's `QUESTION`.
+                2. Review the `CONTEXT` from the clinic's documents.
+                3. Formulate an answer using ONLY the text found in the `CONTEXT`.
+                4. If the `CONTEXT` does not contain the information to answer the `QUESTION`, you will discard this prompt and respond with the following phrase EXACTLY: "As an AI assistant, I can only provide information directly from our clinic's approved documents. That specific topic is not covered in the materials I have available."
+
+                CONTEXT:
+                {context}
+
+                QUESTION:
+                {user_query}
+                """
+
+                # Call the model without the safety_settings parameter
+                model = genai.GenerativeModel('gemini-1.5-flash-latest')
+                response = model.generate_content(prompt_template)
+                ai_answer = response.text
 
         except Exception as e:
+            # If any other error happens, it will be caught and reported.
             ai_answer = f"An error occurred during the RAG process: {e}"
 
         # --- Step 5: Send the final response ---
