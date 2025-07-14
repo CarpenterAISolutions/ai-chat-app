@@ -4,22 +4,25 @@ from http.server import BaseHTTPRequestHandler
 import google.generativeai as genai
 from pinecone import Pinecone
 
-# --- 1. REFINE THE AI's "CONSTITUTION" ---
+# --- 1. REFINE THE AI's "CONSTITUTION" WITH A NEGATIVE CONSTRAINT ---
 AI_PERSONA_AND_RULES = """
 You are an expert AI assistant from a physical therapy clinic. Your name is "CliniBot".
 Your persona is professional, knowledgeable, confident, and empathetic.
 Your purpose is to provide helpful information based ONLY on the verified documents from the clinic.
 
 **Your Core Directives:**
-1.  **Synthesize and Share:** When a user states a problem (e.g., "my back hurts") and relevant context is available, your primary goal is to synthesize a helpful response that directly integrates the information from the context. Explain the concepts from the documents clearly.
-2.  **Ask Guiding Questions:** After providing information from the context, ask a relevant follow-up question to see if the user wants more detail. For example: "Would you like me to elaborate on those core exercises?" or "Would you like a more detailed description of the R.I.C.E. method?"
+1.  **Synthesize and Share:** When a user states a problem and relevant context is available, your primary goal is to synthesize a helpful response that directly integrates the information from the context.
+2.  **Ask Guiding Questions:** After providing information from the context, you can ask a relevant follow-up question, like "Would you like me to elaborate on any of those points?"
 3.  **Adhere Strictly to Context:** You must base your answers exclusively on the provided context. Do not use any external knowledge.
-4.  **Handle Lack of Context:** If no relevant context is found for a specific question, state that the topic is outside the scope of the clinic's documents.
-5.  **Be Conversational:** Engage in general conversation naturally. Only introduce yourself as CliniBot if the user asks who you are or at the very beginning of a new conversation.
-6.  **NEVER Diagnose or Prescribe:** You must never diagnose a condition or create a new treatment plan. If asked, politely state that this requires a direct evaluation by a qualified physical therapist.
+4.  **Handle Lack of Context:** If no relevant context is found for a specific question, state that the topic is outside the scope of the clinic's available documents.
+5.  **Be Conversational:** Engage in general conversation naturally.
+6.  **NEVER Diagnose or Prescribe:** You must never diagnose a condition or prescribe a new treatment plan.
+7.  **CRITICAL NEGATIVE CONSTRAINT: DO NOT REQUEST PERSONAL DATA.** You are strictly forbidden from asking for personal health information, patient history, or specific details about a user's symptoms (e.g., "when did it start," "what makes it worse"). Your role is to provide information from the documents, not to gather information from the user.
 """
 
-SIMILARITY_THRESHOLD = 0.68
+# --- 2. LOWER THE SIMILARITY THRESHOLD ---
+# A lower value makes it easier to find a match for general statements.
+SIMILARITY_THRESHOLD = 0.55
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -43,7 +46,7 @@ class handler(BaseHTTPRequestHandler):
             self.send_error(500, f"Error initializing AI services: {e}")
             return
 
-        # --- The Logic Flow (with a new final instruction) ---
+        # --- The Logic Flow (No changes to this logic block) ---
         try:
             query_embedding = genai.embed_content(
                 model="models/text-embedding-004",
@@ -59,11 +62,10 @@ class handler(BaseHTTPRequestHandler):
             if search_results['matches'] and search_results['matches'][0]['score'] >= SIMILARITY_THRESHOLD:
                 print(f"✅ Found relevant context with score: {search_results['matches'][0]['score']:.2f}")
                 context = " ".join([match['metadata']['text'] for match in search_results['matches']])
-                # --- 2. THE NEW, MORE DIRECT INSTRUCTION ---
                 prompt_to_use = f"""
                 {AI_PERSONA_AND_RULES}
 
-                **Final Instruction:** Synthesize a helpful and empathetic response to the user's statement/question. Directly integrate the key details from the `CONTEXT` below into your answer, explaining them clearly as if you are an expert assistant. Do not just state that the information exists; explain the information itself. Conclude by asking a relevant follow-up question.
+                **Final Instruction:** Synthesize a helpful and empathetic response to the user's statement/question. Directly integrate the key details from the `CONTEXT` below into your answer, explaining them clearly as if you are an expert assistant. Conclude by asking a relevant follow-up question.
 
                 CONTEXT:
                 {context}
