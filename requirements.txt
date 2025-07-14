@@ -1,2 +1,4 @@
+# requirements.txt (CORRECT)
+
 google-generativeai
-pinecone-client
+pinecone
