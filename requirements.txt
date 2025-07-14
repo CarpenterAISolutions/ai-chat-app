@@ -1,5 +1,3 @@
 fastapi
-uvicorn
 pydantic
-google-generativeai
-pinecone-client
+uvicorn
