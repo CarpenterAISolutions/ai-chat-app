@@ -1,49 +1,28 @@
-document.addEventListener('DOMContentLoaded', () => {
-    const chatBox = document.getElementById('chat-box');
-    const chatForm = document.getElementById('chat-form');
-    const userInput = document.getElementById('user-input');
-    const loadingSpinner = document.getElementById('loading-spinner');
+# api/index.py
+from fastapi import FastAPI
+from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
 
-    const BACKEND_URL = '/api/chat'; // This relative path works perfectly on Vercel
+# Create the main FastAPI application. Vercel will find this 'app' object.
+app = FastAPI()
 
-    chatForm.addEventListener('submit', async (event) => {
-        event.preventDefault();
-        const userMessage = userInput.value.trim();
-        if (!userMessage) return;
+# Add the security middleware to allow the frontend to connect.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-        addMessage(userMessage, 'user');
-        userInput.value = '';
-        loadingSpinner.classList.remove('hidden');
+# Define the data structure for the incoming message.
+class ChatQuery(BaseModel):
+    query: str
 
-        try {
-            const response = await fetch(BACKEND_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ query: userMessage })
-            });
-
-            if (!response.ok) {
-                throw new Error('Network response was not ok.');
-            }
-
-            const data = await response.json();
-            addMessage(data.answer, 'ai');
-
-        } catch (error) {
-            console.error('Error:', error);
-            addMessage('Sorry, something went wrong. Please try again.', 'ai');
-        } finally {
-            loadingSpinner.classList.add('hidden');
-        }
-    });
-
-    function addMessage(text, sender) {
-        const messageElement = document.createElement('div');
-        messageElement.classList.add('message', `${sender}-message`);
-        const paragraph = document.createElement('p');
-        paragraph.textContent = text;
-        messageElement.appendChild(paragraph);
-        chatBox.appendChild(messageElement);
-        chatBox.scrollTop = chatBox.scrollHeight;
-    }
-});
+# This is the main function. Because the file is named index.py,
+# FastAPI will correctly handle the full /api/chat route.
+@app.post("/api/chat")
+async def handle_chat(chat_query: ChatQuery):
+    user_message = chat_query.query
+    ai_response = f"Success! The backend is connected and received: '{user_message}'"
+    return {"answer": ai_response}
