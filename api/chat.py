@@ -1,3 +1,4 @@
+# api/chat.py (Final robust version)
 import os
 import json
 from http.server import BaseHTTPRequestHandler
@@ -5,25 +6,13 @@ from typing import List, Dict, Any
 import google.generativeai as genai
 from pinecone import Pinecone
 
-# --- AI Configuration and Threshold (No changes) ---
 AI_PERSONA_AND_RULES = """
-You are an expert AI assistant from a physical therapy clinic. Your name is "CliniBot".
-Your persona is professional, knowledgeable, confident, and empathetic.
-
-**Your Core Directives:**
-1.  **Synthesize and Share:** When relevant context is available, your primary goal is to synthesize a helpful response that directly integrates the information from the context.
-2.  **Use Conversational History:** Use the provided "CONVERSATIONAL HISTORY" to understand follow-up questions. Your response should flow naturally from the previous turn.
-3.  **DO NOT BE REPETITIVE:** Do not greet the user with "Hello" or "Hi" if a conversational history is present. Get straight to the user's point.
-4.  **Adhere Strictly to Context:** You must base your answers exclusively on the provided context when it's available. Do not use external knowledge.
-5.  **Handle Lack of Context:** If no relevant context is found, use the conversational history and your general knowledge to respond naturally.
-6.  **NEVER Diagnose or Prescribe:** You must never diagnose a condition or create a new treatment plan.
-7.  **DO NOT Request Personal Data:** You are strictly forbidden from asking for personal health information or patient history.
+You are an expert AI assistant from a physical therapy clinic. Your name is "CliniBot". Your persona is professional, knowledgeable, confident, and empathetic. Your purpose is to provide helpful information based ONLY on the verified documents from the clinic. Your core directives are to synthesize and share information from the context, use conversational history to understand follow-up questions, avoid being repetitive, adhere strictly to the provided context, handle lack of context gracefully by using your general conversational abilities, never diagnose or prescribe, and never ask for personal data.
 """
 SIMILARITY_THRESHOLD = 0.68
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
-        # --- NEW: Helper function to send JSON responses ---
         def send_json_response(status_code, content):
             self.send_response(status_code)
             self.send_header('Content-type', 'application/json')
@@ -46,13 +35,11 @@ class handler(BaseHTTPRequestHandler):
             
         history: List[Dict[str, Any]] = request_body.get('history', [])
 
-        # --- Initialize Services with new error handling ---
         try:
             gemini_api_key = os.getenv("GEMINI_API_KEY")
             pinecone_api_key = os.getenv("PINECONE_API_KEY")
             pinecone_index_name = "physical-therapy-index"
             if not all([gemini_api_key, pinecone_api_key]):
-                # Instead of self.send_error, use our new helper
                 send_json_response(500, {"answer": "Server Error: API keys are not configured correctly on Vercel."})
                 return
             
@@ -60,15 +47,17 @@ class handler(BaseHTTPRequestHandler):
             pc = Pinecone(api_key=pinecone_api_key)
             index = pc.Index(pinecone_index_name)
         except Exception as e:
-            # Send a detailed JSON error
             error_message = f"Server Error: Could not initialize AI services. Details: {e}"
             send_json_response(500, {"answer": error_message})
             return
 
-        # --- Main RAG Pipeline ---
         try:
-            history_for_search = [msg['content'] for msg in history[-4:]]
+            # --- THIS BLOCK IS NOW MORE ROBUST ---
+            history_for_search = [msg['content'] for msg in history[-4:] if msg.get('content')]
+            if not history_for_search:
+                history_for_search.append(user_query)
             contextual_search_query = "\n".join(history_for_search)
+            # --- END OF ROBUST BLOCK ---
 
             query_embedding = genai.embed_content(model="models/text-embedding-004", content=contextual_search_query, task_type="RETRIEVAL_QUERY")["embedding"]
             search_results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
@@ -88,7 +77,6 @@ class handler(BaseHTTPRequestHandler):
             ai_answer = response.text
 
         except Exception as e:
-            # The main logic block also returns a JSON error
             ai_answer = f"An error occurred during the RAG process: {e}"
 
         send_json_response(200, {"answer": ai_answer})
