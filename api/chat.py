@@ -5,7 +5,7 @@ from typing import List, Dict, Any
 import google.generativeai as genai
 from pinecone import Pinecone
 
-# --- 1. REFINE THE AI's "CONSTITUTION" ---
+# --- AI Configuration and Threshold (No changes) ---
 AI_PERSONA_AND_RULES = """
 You are an expert AI assistant from a physical therapy clinic. Your name is "CliniBot".
 Your persona is professional, knowledgeable, confident, and empathetic.
@@ -19,7 +19,6 @@ Your persona is professional, knowledgeable, confident, and empathetic.
 6.  **NEVER Diagnose or Prescribe:** You must never diagnose a condition or create a new treatment plan.
 7.  **DO NOT Request Personal Data:** You are strictly forbidden from asking for personal health information or patient history.
 """
-
 SIMILARITY_THRESHOLD = 0.68
 
 class handler(BaseHTTPRequestHandler):
@@ -28,10 +27,22 @@ class handler(BaseHTTPRequestHandler):
         post_data = self.rfile.read(content_length)
         request_body = json.loads(post_data)
         
-        user_query = request_body.get('query')
+        # --- NEW: INPUT VALIDATION ---
+        # Get the user's query and remove any leading/trailing whitespace
+        user_query = request_body.get('query', "").strip()
+
+        # If the query is empty after stripping whitespace, stop here.
+        if not user_query:
+            self.send_response(200)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            response_data = {"answer": "Please type a message to get started."}
+            self.wfile.write(json.dumps(response_data).encode('utf-8'))
+            return # Exit the function early
+
+        # --- The rest of the function remains the same ---
         history: List[Dict[str, Any]] = request_body.get('history', [])
 
-        # --- Initialize Services (No changes) ---
         try:
             gemini_api_key = os.getenv("GEMINI_API_KEY")
             pinecone_api_key = os.getenv("PINECONE_API_KEY")
@@ -47,54 +58,31 @@ class handler(BaseHTTPRequestHandler):
             return
 
         try:
-            # --- 2. CREATE A SMARTER SEARCH QUERY ---
-            # We'll combine the last few messages to give the search more context.
-            # This helps the AI understand follow-up questions.
-            history_for_search = [msg['content'] for msg in history[-4:]] # Use last 4 messages
+            history_for_search = [msg['content'] for msg in history[-4:]]
             contextual_search_query = "\n".join(history_for_search)
 
-            query_embedding = genai.embed_content(
-                model="models/text-embedding-004",
-                content=contextual_search_query,
-                task_type="RETRIEVAL_QUERY"
-            )["embedding"]
-
+            query_embedding = genai.embed_content(model="models/text-embedding-004", content=contextual_search_query, task_type="RETRIEVAL_QUERY")["embedding"]
             search_results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
-
+            
             context = ""
-            # Format the history for the AI to read
+            prompt_to_use = ""
             formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history[:-1]])
 
             if search_results['matches'] and search_results['matches'][0]['score'] >= SIMILARITY_THRESHOLD:
-                print(f"✅ Found relevant context with score: {search_results['matches'][0]['score']:.2f}")
                 context = " ".join([match['metadata']['text'] for match in search_results['matches']])
-                # --- 3. REFINE THE FINAL PROMPT ---
                 prompt_to_use = f"""
                 {AI_PERSONA_AND_RULES}
-
-                CONVERSATIONAL HISTORY:
-                {formatted_history}
-
-                CONTEXT FROM DOCUMENTS:
-                {context}
-                
+                CONVERSATIONAL HISTORY:\n{formatted_history}\n
+                CONTEXT FROM DOCUMENTS:\n{context}\n
                 **Final Instruction:** Based on the history and the new context, provide a direct and helpful response to the "USER'S LATEST MESSAGE".
-
-                USER'S LATEST MESSAGE:
-                {user_query}
+                USER'S LATEST MESSAGE:\n{user_query}
                 """
             else:
-                print("⚠️ No relevant context found. Responding based on general rules and history.")
                 prompt_to_use = f"""
                 {AI_PERSONA_AND_RULES}
-
-                CONVERSATIONAL HISTORY:
-                {formatted_history}
-
+                CONVERSATIONAL HISTORY:\n{formatted_history}\n
                 **Final Instruction:** The user has sent the following message. Respond naturally according to your core directives.
-
-                USER'S LATEST MESSAGE:
-                {user_query}
+                USER'S LATEST MESSAGE:\n{user_query}
                 """
 
             model = genai.GenerativeModel('gemini-1.5-flash-latest')
@@ -104,10 +92,6 @@ class handler(BaseHTTPRequestHandler):
         except Exception as e:
             ai_answer = f"An error occurred during the RAG process: {e}"
 
-        # --- Send the final response (No changes) ---
         self.send_response(200)
         self.send_header('Content-type', 'application/json')
         self.end_headers()
-        response_data = {"answer": ai_answer}
-        self.wfile.write(json.dumps(response_data).encode('utf-8'))
-        return
