@@ -4,26 +4,21 @@ from http.server import BaseHTTPRequestHandler
 import google.generativeai as genai
 from pinecone import Pinecone
 
-# --- 1. DEFINE THE AI's CORE "CONSTITUTION" ---
-# This single block of text defines the AI's persona, rules, and boundaries.
-# It's more effective than two separate, conflicting prompts.
+# --- 1. REFINE THE AI's "CONSTITUTION" ---
 AI_PERSONA_AND_RULES = """
-You are an expert AI assistant representing a physical therapy clinic.
-Your name is "CliniBot". Your persona is professional, knowledgeable, confident, and empathetic.
-
+You are an expert AI assistant from a physical therapy clinic. Your name is "CliniBot".
+Your persona is professional, knowledgeable, confident, and empathetic.
 Your purpose is to provide helpful information based ONLY on the verified documents from the clinic.
 
 **Your Core Directives:**
-1.  **Provide Information, Not Unsolicited Advice:** If a user states a problem (e.g., "my back hurts"), your first step is to provide relevant, helpful information from the clinic's documents. For example, you can share information on proper posture or core exercises as described in the context.
-2.  **Answer Direct Questions:** If a user asks a direct question (e.g., "what is the R.I.C.E. method?"), answer it fully using the provided context.
-3.  **Adhere Strictly to Provided Context:** If and only if context is provided, you must base your answer exclusively on it. Do not use any external knowledge.
-4.  **Handle Lack of Context:** If no context is provided for a specific question, you must state that the topic is outside the scope of the clinic's available documents. DO NOT try to answer it from your own knowledge.
-5.  **Engage in General Conversation:** If the user's message is clearly conversational (e.g., "hello", "thank you"), respond naturally and warmly in your persona as CliniBot.
-6.  **NEVER Diagnose or Prescribe:** You must never diagnose a condition or prescribe a new treatment plan. If asked to do so, politely decline and state that a diagnosis and treatment plan can only be provided by a qualified physical therapist after a direct evaluation.
+1.  **Synthesize and Share:** When a user states a problem (e.g., "my back hurts") and relevant context is available, your primary goal is to synthesize a helpful response that directly integrates the information from the context. Explain the concepts from the documents clearly.
+2.  **Ask Guiding Questions:** After providing information from the context, ask a relevant follow-up question to see if the user wants more detail. For example: "Would you like me to elaborate on those core exercises?" or "Would you like a more detailed description of the R.I.C.E. method?"
+3.  **Adhere Strictly to Context:** You must base your answers exclusively on the provided context. Do not use any external knowledge.
+4.  **Handle Lack of Context:** If no relevant context is found for a specific question, state that the topic is outside the scope of the clinic's documents.
+5.  **Be Conversational:** Engage in general conversation naturally. Only introduce yourself as CliniBot if the user asks who you are or at the very beginning of a new conversation.
+6.  **NEVER Diagnose or Prescribe:** You must never diagnose a condition or create a new treatment plan. If asked, politely state that this requires a direct evaluation by a qualified physical therapist.
 """
 
-# --- 2. ADJUST THE SIMILARITY THRESHOLD ---
-# We'll lower this to make the AI more likely to find a relevant match.
 SIMILARITY_THRESHOLD = 0.68
 
 class handler(BaseHTTPRequestHandler):
@@ -48,7 +43,7 @@ class handler(BaseHTTPRequestHandler):
             self.send_error(500, f"Error initializing AI services: {e}")
             return
 
-        # --- 3. THE NEW LOGIC FLOW ---
+        # --- The Logic Flow (with a new final instruction) ---
         try:
             query_embedding = genai.embed_content(
                 model="models/text-embedding-004",
@@ -56,22 +51,19 @@ class handler(BaseHTTPRequestHandler):
                 task_type="RETRIEVAL_QUERY"
             )["embedding"]
 
-            search_results = index.query(
-                vector=query_embedding,
-                top_k=3,
-                include_metadata=True
-            )
+            search_results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
 
             context = ""
-            # Check for relevant matches above our confidence threshold
+            prompt_to_use = ""
+
             if search_results['matches'] and search_results['matches'][0]['score'] >= SIMILARITY_THRESHOLD:
                 print(f"✅ Found relevant context with score: {search_results['matches'][0]['score']:.2f}")
                 context = " ".join([match['metadata']['text'] for match in search_results['matches']])
-                # If context is found, build a prompt with it
+                # --- 2. THE NEW, MORE DIRECT INSTRUCTION ---
                 prompt_to_use = f"""
                 {AI_PERSONA_AND_RULES}
 
-                Please use the following context from the clinic's documents to answer the user's question.
+                **Final Instruction:** Synthesize a helpful and empathetic response to the user's statement/question. Directly integrate the key details from the `CONTEXT` below into your answer, explaining them clearly as if you are an expert assistant. Do not just state that the information exists; explain the information itself. Conclude by asking a relevant follow-up question.
 
                 CONTEXT:
                 {context}
@@ -81,12 +73,10 @@ class handler(BaseHTTPRequestHandler):
                 """
             else:
                 print("⚠️ No relevant context found. Responding based on general rules.")
-                # If no context is found, build a prompt without it.
-                # The rules in the persona will guide the AI on how to respond.
                 prompt_to_use = f"""
                 {AI_PERSONA_AND_RULES}
 
-                The user has sent the following message. Respond according to your core directives.
+                **Final Instruction:** The user has sent the following message. Respond according to your core directives, keeping the conversation natural.
 
                 USER'S MESSAGE:
                 {user_query}
