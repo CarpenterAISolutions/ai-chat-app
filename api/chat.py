@@ -1,27 +1,28 @@
+# api/chat.py (New version with memory)
+
 import os
 import json
 from http.server import BaseHTTPRequestHandler
+from typing import List, Dict, Any # Import new types for validation
 import google.generativeai as genai
 from pinecone import Pinecone
 
-# --- 1. REFINE THE AI's "CONSTITUTION" WITH A NEGATIVE CONSTRAINT ---
+# --- AI Configuration (No changes) ---
 AI_PERSONA_AND_RULES = """
 You are an expert AI assistant from a physical therapy clinic. Your name is "CliniBot".
 Your persona is professional, knowledgeable, confident, and empathetic.
 Your purpose is to provide helpful information based ONLY on the verified documents from the clinic.
 
 **Your Core Directives:**
-1.  **Synthesize and Share:** When a user states a problem and relevant context is available, your primary goal is to synthesize a helpful response that directly integrates the information from the context.
-2.  **Ask Guiding Questions:** After providing information from the context, you can ask a relevant follow-up question, like "Would you like me to elaborate on any of those points?"
-3.  **Adhere Strictly to Context:** You must base your answers exclusively on the provided context. Do not use any external knowledge.
-4.  **Handle Lack of Context:** If no relevant context is found for a specific question, state that the topic is outside the scope of the clinic's available documents.
-5.  **Be Conversational:** Engage in general conversation naturally.
+1.  **Synthesize and Share:** When a user states a problem or asks a question and relevant context is available, your primary goal is to synthesize a helpful response that directly integrates the information from the context.
+2.  **Use Conversational History:** Use the provided "CONVERSATIONAL HISTORY" to understand follow-up questions and maintain context. Refer to previous turns in the conversation when it's relevant.
+3.  **Ask Guiding Questions:** After providing information, you can ask a relevant follow-up question.
+4.  **Adhere Strictly to Context:** You must base your answers exclusively on the provided context when it's available. Do not use external knowledge.
+5.  **Handle Lack of Context:** If no relevant context is found for a specific question, use the conversational history and your general knowledge to respond naturally and helpfully.
 6.  **NEVER Diagnose or Prescribe:** You must never diagnose a condition or prescribe a new treatment plan.
-7.  **CRITICAL NEGATIVE CONSTRAINT: DO NOT REQUEST PERSONAL DATA.** You are strictly forbidden from asking for personal health information, patient history, or specific details about a user's symptoms (e.g., "when did it start," "what makes it worse"). Your role is to provide information from the documents, not to gather information from the user.
+7.  **CRITICAL NEGATIVE CONSTRAINT: DO NOT REQUEST PERSONAL DATA.** You are strictly forbidden from asking for personal health information or patient history.
 """
 
-# --- 2. LOWER THE SIMILARITY THRESHOLD ---
-# A lower value makes it easier to find a match for general statements.
 SIMILARITY_THRESHOLD = 0.55
 
 class handler(BaseHTTPRequestHandler):
@@ -29,7 +30,10 @@ class handler(BaseHTTPRequestHandler):
         content_length = int(self.headers['Content-Length'])
         post_data = self.rfile.read(content_length)
         request_body = json.loads(post_data)
+        
+        # --- NEW: Get the query AND the history from the request ---
         user_query = request_body.get('query')
+        history: List[Dict[str, Any]] = request_body.get('history', [])
 
         # --- Initialize Services (No changes) ---
         try:
@@ -46,18 +50,17 @@ class handler(BaseHTTPRequestHandler):
             self.send_error(500, f"Error initializing AI services: {e}")
             return
 
-        # --- The Logic Flow (No changes to this logic block) ---
+        # --- The Logic Flow (with history integration) ---
         try:
-            query_embedding = genai.embed_content(
-                model="models/text-embedding-004",
-                content=user_query,
-                task_type="RETRIEVAL_QUERY"
-            )["embedding"]
-
+            query_embedding = genai.embed_content(model="models/text-embedding-004", content=user_query, task_type="RETRIEVAL_QUERY")["embedding"]
             search_results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
 
             context = ""
             prompt_to_use = ""
+
+            # --- NEW: Format the chat history for the prompt ---
+            # We remove the last message from history, as it's the current user_query
+            formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history[:-1]])
 
             if search_results['matches'] and search_results['matches'][0]['score'] >= SIMILARITY_THRESHOLD:
                 print(f"✅ Found relevant context with score: {search_results['matches'][0]['score']:.2f}")
@@ -65,22 +68,28 @@ class handler(BaseHTTPRequestHandler):
                 prompt_to_use = f"""
                 {AI_PERSONA_AND_RULES}
 
-                **Final Instruction:** Synthesize a helpful and empathetic response to the user's statement/question. Directly integrate the key details from the `CONTEXT` below into your answer, explaining them clearly as if you are an expert assistant. Conclude by asking a relevant follow-up question.
+                CONVERSATIONAL HISTORY:
+                {formatted_history}
 
-                CONTEXT:
+                CONTEXT FROM DOCUMENTS:
                 {context}
-
-                USER'S QUESTION:
+                
+                Based on the history and the new context, provide a helpful, synthesized response to the user's latest message.
+                
+                USER'S LATEST MESSAGE:
                 {user_query}
                 """
             else:
-                print("⚠️ No relevant context found. Responding based on general rules.")
+                print("⚠️ No relevant context found. Responding based on general rules and history.")
                 prompt_to_use = f"""
                 {AI_PERSONA_AND_RULES}
 
-                **Final Instruction:** The user has sent the following message. Respond according to your core directives, keeping the conversation natural.
+                CONVERSATIONAL HISTORY:
+                {formatted_history}
 
-                USER'S MESSAGE:
+                The user has sent the following message. Respond according to your core directives, keeping the conversation natural and acknowledging the history.
+
+                USER'S LATEST MESSAGE:
                 {user_query}
                 """
 
