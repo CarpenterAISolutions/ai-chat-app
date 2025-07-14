@@ -1,12 +1,12 @@
-# api/index.py
+# api/chat.py
 from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 
-# Create the main FastAPI application. Vercel will find this 'app' object.
+# Create the main FastAPI application
 app = FastAPI()
 
-# Add the security middleware to allow the frontend to connect.
+# Add the crucial security middleware to allow the frontend to connect
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -15,13 +15,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Define the data structure for the incoming message.
+# Define the data structure for the incoming message
 class ChatQuery(BaseModel):
     query: str
 
-# This is the main function. Because the file is named index.py,
-# FastAPI will correctly handle the full /api/chat route.
-@app.post("/api/chat")
+# This is the main function.
+# Because the file is named chat.py, Vercel routes /api/chat here.
+# The "@app.post('/')" decorator tells FastAPI to handle the request at the root of this file.
+@app.post("/")
 async def handle_chat(chat_query: ChatQuery):
     user_message = chat_query.query
     ai_response = f"Success! The backend is connected and received: '{user_message}'"
