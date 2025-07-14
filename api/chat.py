@@ -20,7 +20,8 @@ class ChatQuery(BaseModel):
     query: str
 
 # This is the main function. Because the file is named chat.py,
-# Vercel will automatically route requests from /api/chat here.
+# Vercel automatically routes requests from /api/chat to this file.
+# The "@app.post('/')" tells FastAPI to handle the request at the root of this file.
 @app.post("/")
 async def handle_chat(chat_query: ChatQuery):
     user_message = chat_query.query
