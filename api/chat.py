@@ -23,40 +23,49 @@ SIMILARITY_THRESHOLD = 0.68
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
-        content_length = int(self.headers['Content-Length'])
-        post_data = self.rfile.read(content_length)
-        request_body = json.loads(post_data)
-        
-        # --- NEW: INPUT VALIDATION ---
-        # Get the user's query and remove any leading/trailing whitespace
-        user_query = request_body.get('query', "").strip()
-
-        # If the query is empty after stripping whitespace, stop here.
-        if not user_query:
-            self.send_response(200)
+        # --- NEW: Helper function to send JSON responses ---
+        def send_json_response(status_code, content):
+            self.send_response(status_code)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
-            response_data = {"answer": "Please type a message to get started."}
-            self.wfile.write(json.dumps(response_data).encode('utf-8'))
-            return # Exit the function early
+            self.wfile.write(json.dumps(content).encode('utf-8'))
 
-        # --- The rest of the function remains the same ---
+        content_length = int(self.headers.get('Content-Length', 0))
+        post_data = self.rfile.read(content_length)
+        
+        try:
+            request_body = json.loads(post_data)
+        except json.JSONDecodeError:
+            send_json_response(400, {"answer": "Error: Invalid request format."})
+            return
+
+        user_query = request_body.get('query', "").strip()
+        if not user_query:
+            send_json_response(200, {"answer": "Please type a message to get started."})
+            return
+            
         history: List[Dict[str, Any]] = request_body.get('history', [])
 
+        # --- Initialize Services with new error handling ---
         try:
             gemini_api_key = os.getenv("GEMINI_API_KEY")
             pinecone_api_key = os.getenv("PINECONE_API_KEY")
             pinecone_index_name = "physical-therapy-index"
             if not all([gemini_api_key, pinecone_api_key]):
-                self.send_error(500, "API keys are not configured.")
+                # Instead of self.send_error, use our new helper
+                send_json_response(500, {"answer": "Server Error: API keys are not configured correctly on Vercel."})
                 return
+            
             genai.configure(api_key=gemini_api_key)
             pc = Pinecone(api_key=pinecone_api_key)
             index = pc.Index(pinecone_index_name)
         except Exception as e:
-            self.send_error(500, f"Error initializing AI services: {e}")
+            # Send a detailed JSON error
+            error_message = f"Server Error: Could not initialize AI services. Details: {e}"
+            send_json_response(500, {"answer": error_message})
             return
 
+        # --- Main RAG Pipeline ---
         try:
             history_for_search = [msg['content'] for msg in history[-4:]]
             contextual_search_query = "\n".join(history_for_search)
@@ -70,28 +79,17 @@ class handler(BaseHTTPRequestHandler):
 
             if search_results['matches'] and search_results['matches'][0]['score'] >= SIMILARITY_THRESHOLD:
                 context = " ".join([match['metadata']['text'] for match in search_results['matches']])
-                prompt_to_use = f"""
-                {AI_PERSONA_AND_RULES}
-                CONVERSATIONAL HISTORY:\n{formatted_history}\n
-                CONTEXT FROM DOCUMENTS:\n{context}\n
-                **Final Instruction:** Based on the history and the new context, provide a direct and helpful response to the "USER'S LATEST MESSAGE".
-                USER'S LATEST MESSAGE:\n{user_query}
-                """
+                prompt_to_use = f"{AI_PERSONA_AND_RULES}\n\nCONVERSATIONAL HISTORY:\n{formatted_history}\n\nCONTEXT FROM DOCUMENTS:\n{context}\n\n**Final Instruction:** Based on the history and the new context, provide a direct and helpful response to the \"USER'S LATEST MESSAGE\".\n\nUSER'S LATEST MESSAGE:\n{user_query}"
             else:
-                prompt_to_use = f"""
-                {AI_PERSONA_AND_RULES}
-                CONVERSATIONAL HISTORY:\n{formatted_history}\n
-                **Final Instruction:** The user has sent the following message. Respond naturally according to your core directives.
-                USER'S LATEST MESSAGE:\n{user_query}
-                """
+                prompt_to_use = f"{AI_PERSONA_AND_RULES}\n\nCONVERSATIONAL HISTORY:\n{formatted_history}\n\n**Final Instruction:** The user has sent the following message. Respond naturally according to your core directives.\n\nUSER'S LATEST MESSAGE:\n{user_query}"
 
             model = genai.GenerativeModel('gemini-1.5-flash-latest')
             response = model.generate_content(prompt_to_use)
             ai_answer = response.text
 
         except Exception as e:
+            # The main logic block also returns a JSON error
             ai_answer = f"An error occurred during the RAG process: {e}"
 
-        self.send_response(200)
-        self.send_header('Content-type', 'application/json')
-        self.end_headers()
+        send_json_response(200, {"answer": ai_answer})
+        return
