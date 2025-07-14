@@ -1,63 +1,46 @@
-# api/chat.py
-from http.server import BaseHTTPRequestHandler
-import json
 import os
+import json
+from http.server import BaseHTTPRequestHandler
 import google.generativeai as genai
 from pinecone import Pinecone
 
-# --- STEP 1: DEFINE A SIMILARITY THRESHOLD ---
-# This is our confidence score. 0.0 is no similarity, 1.0 is a perfect match.
-# A good starting point is often between 0.70 and 0.80. You can adjust this value.
-SIMILARITY_THRESHOLD = 0.75
+# --- 1. DEFINE THE AI's CORE "CONSTITUTION" ---
+# This single block of text defines the AI's persona, rules, and boundaries.
+# It's more effective than two separate, conflicting prompts.
+AI_PERSONA_AND_RULES = """
+You are an expert AI assistant representing a physical therapy clinic.
+Your name is "CliniBot". Your persona is professional, knowledgeable, confident, and empathetic.
 
-# --- STEP 2: CREATE TWO SEPARATE PROMPTS ---
+Your purpose is to provide helpful information based ONLY on the verified documents from the clinic.
 
-# This is our strict, primary prompt for when we have good context.
-STRICT_RAG_PROMPT = """
-CRITICAL SAFETY INSTRUCTION: YOUR RESPONSE IS OF THE UTMOST IMPORTANCE.
-You are a clinical AI assistant. Your sole purpose is to relay information from verified clinical documents provided to you.
-You are absolutely prohibited from using any external knowledge. This is a strict safety protocol.
-
-CONTEXT:
-{context}
-
-Based ONLY on the CONTEXT provided, answer the following question.
-QUESTION: {question}
-
-If the context is not sufficient to answer the question, respond with:
-"Based on the clinic's documents, I cannot answer that specific question. Please try rephrasing or ask about a different topic."
+**Your Core Directives:**
+1.  **Provide Information, Not Unsolicited Advice:** If a user states a problem (e.g., "my back hurts"), your first step is to provide relevant, helpful information from the clinic's documents. For example, you can share information on proper posture or core exercises as described in the context.
+2.  **Answer Direct Questions:** If a user asks a direct question (e.g., "what is the R.I.C.E. method?"), answer it fully using the provided context.
+3.  **Adhere Strictly to Provided Context:** If and only if context is provided, you must base your answer exclusively on it. Do not use any external knowledge.
+4.  **Handle Lack of Context:** If no context is provided for a specific question, you must state that the topic is outside the scope of the clinic's available documents. DO NOT try to answer it from your own knowledge.
+5.  **Engage in General Conversation:** If the user's message is clearly conversational (e.g., "hello", "thank you"), respond naturally and warmly in your persona as CliniBot.
+6.  **NEVER Diagnose or Prescribe:** You must never diagnose a condition or prescribe a new treatment plan. If asked to do so, politely decline and state that a diagnosis and treatment plan can only be provided by a qualified physical therapist after a direct evaluation.
 """
 
-# This is our friendly, conversational prompt for when no context is found.
-GENERAL_PROMPT = """
-You are a friendly and helpful AI assistant for a physical therapy clinic.
-Engage in general conversation, but DO NOT PROVIDE MEDICAL OR PHYSICAL THERAPY ADVICE.
-If the user asks for any exercise, diagnosis, or treatment recommendations, you must politely decline and suggest they ask a more specific question about the clinic's information or consult a professional.
-
-User's message: "{question}"
-"""
+# --- 2. ADJUST THE SIMILARITY THRESHOLD ---
+# We'll lower this to make the AI more likely to find a relevant match.
+SIMILARITY_THRESHOLD = 0.68
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
-        # ... (No changes to Steps 1, 2, and 3: reading request, getting keys, configuring services) ...
         content_length = int(self.headers['Content-Length'])
         post_data = self.rfile.read(content_length)
         request_body = json.loads(post_data)
         user_query = request_body.get('query')
 
+        # --- Initialize Services (No changes) ---
         try:
             gemini_api_key = os.getenv("GEMINI_API_KEY")
             pinecone_api_key = os.getenv("PINECONE_API_KEY")
             pinecone_index_name = "physical-therapy-index"
-
             if not all([gemini_api_key, pinecone_api_key]):
-                self.send_error(500, "API keys are not configured on Vercel.")
+                self.send_error(500, "API keys are not configured.")
                 return
-        except Exception as e:
-            self.send_error(500, f"Server Configuration Error: {e}")
-            return
-
-        try:
             genai.configure(api_key=gemini_api_key)
             pc = Pinecone(api_key=pinecone_api_key)
             index = pc.Index(pinecone_index_name)
@@ -65,7 +48,7 @@ class handler(BaseHTTPRequestHandler):
             self.send_error(500, f"Error initializing AI services: {e}")
             return
 
-        # --- Step 4: Updated RAG Pipeline ---
+        # --- 3. THE NEW LOGIC FLOW ---
         try:
             query_embedding = genai.embed_content(
                 model="models/text-embedding-004",
@@ -79,17 +62,35 @@ class handler(BaseHTTPRequestHandler):
                 include_metadata=True
             )
 
-            # --- STEP 3: THE NEW LOGIC BRANCH ---
-            # Check if we have matches AND if the top match is above our confidence threshold.
+            context = ""
+            # Check for relevant matches above our confidence threshold
             if search_results['matches'] and search_results['matches'][0]['score'] >= SIMILARITY_THRESHOLD:
-                # PATH 1: We found relevant context. Use the STRICT prompt.
                 print(f"✅ Found relevant context with score: {search_results['matches'][0]['score']:.2f}")
                 context = " ".join([match['metadata']['text'] for match in search_results['matches']])
-                prompt_to_use = STRICT_RAG_PROMPT.format(context=context, question=user_query)
+                # If context is found, build a prompt with it
+                prompt_to_use = f"""
+                {AI_PERSONA_AND_RULES}
+
+                Please use the following context from the clinic's documents to answer the user's question.
+
+                CONTEXT:
+                {context}
+
+                USER'S QUESTION:
+                {user_query}
+                """
             else:
-                # PATH 2: No relevant context found. Use the GENERAL prompt for conversation.
-                print("⚠️ No relevant context found. Using general conversational prompt.")
-                prompt_to_use = GENERAL_PROMPT.format(question=user_query)
+                print("⚠️ No relevant context found. Responding based on general rules.")
+                # If no context is found, build a prompt without it.
+                # The rules in the persona will guide the AI on how to respond.
+                prompt_to_use = f"""
+                {AI_PERSONA_AND_RULES}
+
+                The user has sent the following message. Respond according to your core directives.
+
+                USER'S MESSAGE:
+                {user_query}
+                """
 
             model = genai.GenerativeModel('gemini-1.5-flash-latest')
             response = model.generate_content(prompt_to_use)
@@ -98,7 +99,7 @@ class handler(BaseHTTPRequestHandler):
         except Exception as e:
             ai_answer = f"An error occurred during the RAG process: {e}"
 
-        # --- Step 5: Send the final response ---
+        # --- Send the final response (No changes) ---
         self.send_response(200)
         self.send_header('Content-type', 'application/json')
         self.end_headers()
