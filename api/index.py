@@ -1,28 +1,27 @@
-# api/chat.py
+# api/index.py
 from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 
-# Create the main FastAPI application
+# Create the main FastAPI application. Vercel will find this 'app' object.
 app = FastAPI()
 
-# This is the crucial security middleware that was missing.
-# It tells the server to accept requests from any other website.
-# This directly fixes the CORS error.
+# Add the security middleware to allow the frontend to connect.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins for now. We can lock this down later.
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Define the data structure for the incoming message
+# Define the data structure for the incoming message.
 class ChatQuery(BaseModel):
     query: str
 
-# This is the main function that handles the chat request.
-@app.post("/")
+# This is the main function. Because the file is named index.py,
+# FastAPI will correctly handle the full /api/chat route.
+@app.post("/api/chat")
 async def handle_chat(chat_query: ChatQuery):
     user_message = chat_query.query
     ai_response = f"Success! The backend is connected and received: '{user_message}'"
