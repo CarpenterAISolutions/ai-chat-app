@@ -5,31 +5,75 @@ from typing import List, Dict, Any
 import google.generativeai as genai
 from pinecone import Pinecone
 
-# --- THE FIX: A NEW "THOUGHT PROCESS" FOR THE AI ---
+# --- 1. THE AI's CORE "CONSTITUTION" ---
+# This is now focused on its persona and high-level rules.
 AI_PERSONA_AND_RULES = """
-You are "CliniBot," a professional, knowledgeable, and empathetic AI assistant for a physical therapy clinic.
+You are "CliniBot," a professional, knowledgeable, confident, and empathetic AI assistant for a physical therapy clinic.
 
-**Your Thought Process and Rules of Engagement:**
-
-1.  **Analyze the User's Intent:** First, examine the "USER'S LATEST MESSAGE" in the context of the "CONVERSATIONAL HISTORY". Determine the user's intent. Is it a new question, or is it a command related to your *immediately preceding* response (e.g., "simplify that," "tell me more," "explain that differently")?
-
-2.  **Fulfill Meta-Commands:** If the user's intent is a command about your last message, fulfill it directly using the conversational history. **Do not perform a new search.** For example, if you just gave a long explanation and the user says "simplify that," you must provide a simplified version of your last response.
-
-3.  **Handle New Queries:** If the user's intent is a new question or statement, proceed with the following rules:
-    a. **Use Provided Context:** If relevant "CONTEXT FROM DOCUMENTS" is provided, you MUST base your answer exclusively on it. Synthesize the information into a helpful, detailed response. Do not mention your own limitations or talk about the documents themselves.
-    b. **Handle Lack of Context:** If no relevant context is found, respond naturally and conversationally. If the user asks for information outside your scope, state your limitations gracefully. Example: "That's a great question, but it falls outside the scope of the clinical information I have available. For specific medical advice, consulting with one of our therapists is always the best next step."
-    c. **Follow Safety Protocols:** NEVER diagnose, prescribe, or ask for personal health information. Avoid repetitive greetings.
+**Your Core Directives:**
+- **CRITICAL SAFETY RULE: YOU ARE EXPLICITLY FORBIDDEN FROM REQUESTING PERSONAL DATA.** Never ask for personal health information, patient history, or specific details about a user's symptoms (e.g., "when did it start," "what makes it worse"). Your role is to provide information from documents, not to gather information.
+- **Synthesize and Share:** When context is available, your primary goal is to synthesize a helpful response that directly integrates the information.
+- **Handle Frustration Gracefully:** If the user expresses frustration (e.g., "that's not what I asked"), apologize for the misunderstanding and try to guide them by offering examples of questions you can answer.
+- **Be Natural:** Do not be repetitive. Avoid starting every message with "Hello" if a conversation is in progress.
+- **NEVER Diagnose or Prescribe.**
 """
 
 SIMILARITY_THRESHOLD = 0.65
 
-def rewrite_query_with_history(history: List[Dict[str, Any]], llm_model) -> str:
-    if len(history) <= 1:
-        return history[0]['content'] if history and history[0].get('content') else ""
-        
+# --- 2. NEW HELPER FUNCTIONS FOR THE AI'S "THOUGHT PROCESS" ---
+
+def is_meta_command(history: List[Dict[str, Any]], llm_model) -> bool:
+    """Determines if the user's last message is a command about the conversation itself."""
+    if len(history) < 2:
+        return False # Not enough history to be a meta-command
+
     user_query = history[-1]['content']
+    last_ai_response = history[-2]['content']
+
+    prompt = f"""
+    Analyze the user's latest message in the context of the AI's last response.
+    Is the user's message a "meta-command" asking to modify, simplify, summarize, or elaborate on the AI's previous statement?
+    Respond with only the word "YES" or "NO".
+
+    AI's Last Response: "{last_ai_response[:200]}..."
+    User's Latest Message: "{user_query}"
+
+    Is this a meta-command? (YES/NO):
+    """
+    try:
+        response = llm_model.generate_content(prompt)
+        decision = response.text.strip().upper()
+        print(f"Meta-command check for '{user_query}': {decision}")
+        return "YES" in decision
+    except Exception as e:
+        print(f"Error in meta-command check: {e}")
+        return False
+
+def handle_meta_command(history: List[Dict[str, Any]], llm_model) -> str:
+    """Handles meta-commands like 'simplify that'."""
+    formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history])
+    
+    prompt = f"""
+    {AI_PERSONA_AND_RULES}
+    
+    You are in a conversation. The user has just given you a command about your previous response.
+    Analyze the full "CONVERSATIONAL HISTORY" and fulfill the user's latest command.
+
+    CONVERSATIONAL HISTORY:
+    {formatted_history}
+    """
+    response = llm_model.generate_content(prompt)
+    return response.text
+
+def rewrite_query_for_search(history: List[Dict[str, Any]], llm_model) -> str:
+    """Rewrites a conversational query into a standalone search query."""
+    user_query = history[-1]['content']
+    if len(history) == 1:
+        return user_query # No history to rewrite from
+
     formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history[:-1]])
     prompt = f"Based on the chat history, rewrite the user's latest message into a clear, standalone search query.\n\nChat History:\n{formatted_history}\n\nUser's Latest Message: \"{user_query}\"\n\nRewritten Search Query:"
+    
     try:
         response = llm_model.generate_content(prompt)
         rewritten_query = response.text.strip()
@@ -37,7 +81,7 @@ def rewrite_query_with_history(history: List[Dict[str, Any]], llm_model) -> str:
         print(f"Original query: '{user_query}' -> Rewritten query: '{rewritten_query}'")
         return rewritten_query
     except Exception as e:
-        print(f"Error during query rewriting, falling back to original query. Error: {e}")
+        print(f"Error during query rewriting, falling back to original. Error: {e}")
         return user_query
 
 class handler(BaseHTTPRequestHandler):
@@ -71,25 +115,37 @@ class handler(BaseHTTPRequestHandler):
             send_json_response(500, {"answer": f"Server Error: Could not initialize AI services. Details: {e}"})
             return
 
+        # --- 3. THE NEW DECISION-MAKING LOGIC FLOW ---
         try:
-            search_query = user_query
-            if len(history) > 1:
-                search_query = rewrite_query_with_history(history, model)
-
-            query_embedding = genai.embed_content(model="models/text-embedding-004", content=search_query, task_type="RETRIEVAL_QUERY")["embedding"]
-            search_results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
-            
-            context = ""
-            formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history]) # Pass full history now
-
-            if search_results['matches'] and search_results['matches'][0]['score'] >= SIMILARITY_THRESHOLD:
-                context = " ".join([match['metadata']['text'] for match in search_results['matches']])
-                prompt_to_use = f"{AI_PERSONA_AND_RULES}\n\nCONVERSATIONAL HISTORY:\n{formatted_history}\n\nCONTEXT FROM DOCUMENTS:\n{context}\n\nUSER'S LATEST MESSAGE:\n{user_query}"
+            ai_answer = ""
+            # Step A: Decide if the user's message is a meta-command
+            if is_meta_command(history, model):
+                # Path 1: Handle the meta-command directly
+                ai_answer = handle_meta_command(history, model)
             else:
-                prompt_to_use = f"{AI_PERSONA_AND_RULES}\n\nCONVERSATIONAL HISTORY:\n{formatted_history}\n\nCONTEXT FROM DOCUMENTS:\n[No relevant context found]\n\nUSER'S LATEST MESSAGE:\n{user_query}"
-            
-            response = model.generate_content(prompt_to_use)
-            ai_answer = response.text
+                # Path 2: It's a new question, so run the RAG process
+                # B-1: Rewrite the query for a better search
+                search_query = rewrite_query_for_search(history, model)
+
+                # B-2: Embed and search Pinecone
+                query_embedding = genai.embed_content(model="models/text-embedding-004", content=search_query, task_type="RETRIEVAL_QUERY")["embedding"]
+                search_results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
+                
+                context = ""
+                formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history])
+
+                if search_results['matches'] and search_results['matches'][0]['score'] >= SIMILARITY_THRESHOLD:
+                    # B-3a: If context is found, build a prompt with it
+                    context = " ".join([match['metadata']['text'] for match in search_results['matches']])
+                    prompt_to_use = f"{AI_PERSONA_AND_RULES}\n\nCONVERSATIONAL HISTORY:\n{formatted_history}\n\nCONTEXT FROM DOCUMENTS:\n{context}\n\n**Instruction:** Based on the history and context, respond to the user's latest message."
+                else:
+                    # B-3b: If no context, build a prompt without it
+                    prompt_to_use = f"{AI_PERSONA_AND_RULES}\n\nCONVERSATIONAL HISTORY:\n{formatted_history}\n\nCONTEXT FROM DOCUMENTS:\n[No relevant context found]\n\n**Instruction:** Respond to the user's latest message naturally based on your persona and rules."
+                
+                # B-4: Generate the final answer
+                response = model.generate_content(prompt_to_use)
+                ai_answer = response.text
+
         except Exception as e:
             ai_answer = f"An error occurred during the RAG process: {e}"
 
