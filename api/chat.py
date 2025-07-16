@@ -1,4 +1,3 @@
-# api/chat.py (Final Business-Ready Architecture)
 import os
 import json
 from http.server import BaseHTTPRequestHandler
@@ -6,7 +5,6 @@ from typing import List, Dict, Any
 import google.generativeai as genai
 from pinecone import Pinecone
 
-# --- Final AI Persona and Rules ---
 AI_PERSONA_AND_RULES = """
 You are "CliniBot," an expert AI assistant for a physical therapy clinic. Your persona is professional, knowledgeable, and empathetic.
 **Your Core Directives:**
@@ -19,12 +17,17 @@ You are "CliniBot," an expert AI assistant for a physical therapy clinic. Your p
 """
 SIMILARITY_THRESHOLD = 0.70
 
+# --- THIS FUNCTION IS NOW FIXED ---
 def rewrite_query_for_search(history: List[Dict[str, Any]], llm_model) -> str:
     """Uses the LLM to rewrite a user's query to be a standalone question for better search results."""
+    # ** THE FIX - PART 1 **
+    # Add a guard clause to handle an empty or short history.
+    if not history:
+        return "" # Return empty if there's no history
+    
     user_query = history[-1]['content']
-    # If this is the first real question, no need to rewrite.
-    if len(history) <= 2: # Assuming first message from AI, then first from user
-        return user_query
+    if len(history) <= 2:
+        return user_query # If it's the first real question, no need to rewrite.
 
     formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history[:-1]])
     prompt = f"Based on the chat history, rewrite the user's latest message into a clear, standalone search query.\n\nChat History:\n{formatted_history}\n\nUser's Latest Message: \"{user_query}\"\n\nRewritten Search Query:"
@@ -35,10 +38,11 @@ def rewrite_query_for_search(history: List[Dict[str, Any]], llm_model) -> str:
         print(f"Original query: '{user_query}' -> Rewritten query: '{rewritten_query}'")
         return rewritten_query if rewritten_query else user_query
     except Exception:
-        return user_query # Fallback on error
+        return user_query
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
+        # ... (Helper function and setup are unchanged) ...
         def send_json_response(status_code, content):
             self.send_response(status_code)
             self.send_header('Content-type', 'application/json')
@@ -56,6 +60,7 @@ class handler(BaseHTTPRequestHandler):
             return
             
         try:
+            # ... (Service initialization is unchanged) ...
             gemini_api_key = os.getenv("GEMINI_API_KEY")
             pinecone_api_key = os.getenv("PINECONE_API_KEY")
             pinecone_index_name = "physical-therapy-index"
@@ -68,16 +73,19 @@ class handler(BaseHTTPRequestHandler):
             return
 
         try:
-            # Step 1: Check for Meta-Command using simple, reliable code
             is_meta_command = any(user_query.lower().startswith(cmd) for cmd in ['simplify', 'explain', 'summarize', 'rephrase', 'what you just said'])
             
-            if is_meta_command and len(history) > 1:
-                # Path A: Handle the meta-command
+            if is_meta_command and len(history) >= 2:
                 formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history])
                 prompt_to_use = f"{AI_PERSONA_AND_RULES}\n\nCONVERSATIONAL HISTORY:\n{formatted_history}\n\n**Instruction:** The user has issued a command about your last response ('{user_query}'). Fulfill this command now."
             else:
-                # Path B: Standard RAG process for new questions
                 search_query = rewrite_query_for_search(history, model)
+
+                # ** THE FIX - PART 2 **
+                # Add a fallback to ensure search_query is never empty.
+                if not search_query:
+                    search_query = user_query
+                
                 query_embedding = genai.embed_content(model="models/text-embedding-004", content=search_query, task_type="RETRIEVAL_QUERY")["embedding"]
                 search_results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
                 
