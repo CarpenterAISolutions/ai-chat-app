@@ -5,8 +5,6 @@ from typing import List, Dict, Any
 import google.generativeai as genai
 from pinecone import Pinecone
 
-# --- A SIMPLIFIED, DIRECT SYSTEM INSTRUCTION ---
-# This is a much clearer and more reliable way to guide the AI.
 SYSTEM_INSTRUCTION = """
 You are "CliniBot," an expert AI assistant for a physical therapy clinic.
 Your persona is professional, knowledgeable, and empathetic.
@@ -20,18 +18,18 @@ The `CONTEXT` contains relevant documents and the recent conversation history.
 - NEVER ask for personal health information.
 - Be natural and conversational. Avoid repetitive greetings.
 """
-SIMILARITY_THRESHOLD = 0.72
+# --- CHANGE 1: LOWER THE THRESHOLD ---
+SIMILARITY_THRESHOLD = 0.60
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
-        # Helper function and initial setup
+        # ... (The first part of the file is unchanged) ...
         def send_json_response(status_code, content):
             self.send_response(status_code)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps(content).encode('utf-8'))
 
-        # Standard request handling
         content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length)
         request_body = json.loads(post_data)
@@ -42,7 +40,6 @@ class handler(BaseHTTPRequestHandler):
             send_json_response(200, {"answer": "Please type a message."})
             return
 
-        # Service initialization
         try:
             gemini_api_key = os.getenv("GEMINI_API_KEY")
             pinecone_api_key = os.getenv("PINECONE_API_KEY")
@@ -55,48 +52,27 @@ class handler(BaseHTTPRequestHandler):
             send_json_response(500, {"answer": f"Server Error: Could not initialize AI services. Details: {e}"})
             return
 
-        # --- Simplified and Stabilized Logic Flow ---
         try:
-            # 1. Create a contextual search query
             search_query = user_query
             if len(history) > 1:
-                # Use the last two messages for context
                 contextual_history = "\n".join([msg['content'] for msg in history[-2:] if msg.get('content')])
                 search_query = f"Based on the conversation below, what is a good search query for the user's last message?\n\n{contextual_history}"
 
-            # 2. Search Pinecone for relevant documents
             query_embedding = genai.embed_content(model="models/text-embedding-004", content=search_query, task_type="RETRIEVAL_QUERY")["embedding"]
             search_results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
             
-            # 3. Build a single, clean context block for the AI
+            # --- CHANGE 2: ADD A PRINT STATEMENT FOR DEBUGGING ---
+            print(f"PINEcone Search Results: {search_results}")
+
             retrieved_docs = ""
             if search_results['matches'] and search_results['matches'][0]['score'] >= SIMILARITY_THRESHOLD:
                 retrieved_docs = "\n".join([match['metadata']['text'] for match in search_results['matches']])
             
+            # ... (The rest of the file is unchanged) ...
             formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history])
-
-            combined_context = f"""
-            CONVERSATIONAL HISTORY:
-            {formatted_history}
-
-            RELEVANT DOCUMENTS:
-            {retrieved_docs if retrieved_docs else "No relevant documents found."}
-            """
-
-            # 4. Construct the final, simple prompt
-            final_prompt = f"""
-            {SYSTEM_INSTRUCTION}
-
-            CONTEXT:
-            {combined_context}
-
-            Based on all the information above, provide a direct and helpful answer to the user's latest message.
-
-            USER'S LATEST MESSAGE:
-            {user_query}
-            """
+            combined_context = f"CONVERSATIONAL HISTORY:\n{formatted_history}\n\nRELEVANT DOCUMENTS:\n{retrieved_docs if retrieved_docs else 'No relevant documents found.'}"
+            final_prompt = f"{SYSTEM_INSTRUCTION}\n\nCONTEXT:\n{combined_context}\n\nBased on all the information above, provide a direct and helpful answer to the user's latest message.\n\nUSER'S LATEST MESSAGE:\n{user_query}"
             
-            # 5. Generate the response
             response = model.generate_content(final_prompt)
             ai_answer = response.text
 
