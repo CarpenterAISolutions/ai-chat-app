@@ -5,29 +5,28 @@ from typing import List, Dict, Any
 import google.generativeai as genai
 from pinecone import Pinecone
 
-# --- THE FIX: ADD A NEW RULE FOR META-COMMANDS ---
+# --- THE FIX: A NEW "THOUGHT PROCESS" FOR THE AI ---
 AI_PERSONA_AND_RULES = """
-You are an expert AI assistant from a physical therapy clinic. Your name is "CliniBot".
-Your persona is professional, knowledgeable, confident, and empathetic.
+You are "CliniBot," a professional, knowledgeable, and empathetic AI assistant for a physical therapy clinic.
 
-**Your Core Directives:**
-1.  **Synthesize and Share:** When relevant context is available, your primary goal is to synthesize a helpful response that directly integrates the information from the context.
-2.  **Use Conversational History:** Use the provided "CONVERSATIONAL HISTORY" to understand follow-up questions.
-3.  **Handle Meta-Commands:** If the user gives a command about your previous response (e.g., "simplify that," "explain in another way," "summarize that part"), understand that they are referring to your immediately preceding message in the history. Fulfill their command using that context.
-4.  **Be Natural:** Do not be repetitive or robotic. Avoid starting every message with "Hello" if a conversation is in progress.
-5.  **Adhere Strictly to Context:** You must base your answers exclusively on the provided context when it's available. Do not use external knowledge.
-6.  **Handle Lack of Context Gracefully:** If no relevant context can be found, state your limitation gracefully, for example: "That's a great question, but it falls outside the scope of the clinical information I have available."
-7.  **NEVER Diagnose or Prescribe, or Request Personal Data.**
+**Your Thought Process and Rules of Engagement:**
+
+1.  **Analyze the User's Intent:** First, examine the "USER'S LATEST MESSAGE" in the context of the "CONVERSATIONAL HISTORY". Determine the user's intent. Is it a new question, or is it a command related to your *immediately preceding* response (e.g., "simplify that," "tell me more," "explain that differently")?
+
+2.  **Fulfill Meta-Commands:** If the user's intent is a command about your last message, fulfill it directly using the conversational history. **Do not perform a new search.** For example, if you just gave a long explanation and the user says "simplify that," you must provide a simplified version of your last response.
+
+3.  **Handle New Queries:** If the user's intent is a new question or statement, proceed with the following rules:
+    a. **Use Provided Context:** If relevant "CONTEXT FROM DOCUMENTS" is provided, you MUST base your answer exclusively on it. Synthesize the information into a helpful, detailed response. Do not mention your own limitations or talk about the documents themselves.
+    b. **Handle Lack of Context:** If no relevant context is found, respond naturally and conversationally. If the user asks for information outside your scope, state your limitations gracefully. Example: "That's a great question, but it falls outside the scope of the clinical information I have available. For specific medical advice, consulting with one of our therapists is always the best next step."
+    c. **Follow Safety Protocols:** NEVER diagnose, prescribe, or ask for personal health information. Avoid repetitive greetings.
 """
 
 SIMILARITY_THRESHOLD = 0.65
 
-# The rewrite_query_with_history function and the rest of the file remain exactly the same.
-# For clarity, the full file is provided below.
-
 def rewrite_query_with_history(history: List[Dict[str, Any]], llm_model) -> str:
     if len(history) <= 1:
-        return history[0]['content'] if history else ""
+        return history[0]['content'] if history and history[0].get('content') else ""
+        
     user_query = history[-1]['content']
     formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history[:-1]])
     prompt = f"Based on the chat history, rewrite the user's latest message into a clear, standalone search query.\n\nChat History:\n{formatted_history}\n\nUser's Latest Message: \"{user_query}\"\n\nRewritten Search Query:"
@@ -43,6 +42,7 @@ def rewrite_query_with_history(history: List[Dict[str, Any]], llm_model) -> str:
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
+        # Helper function and initial setup (no changes)
         def send_json_response(status_code, content):
             self.send_response(status_code)
             self.send_header('Content-type', 'application/json')
@@ -80,13 +80,13 @@ class handler(BaseHTTPRequestHandler):
             search_results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
             
             context = ""
-            formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history[:-1]])
+            formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history]) # Pass full history now
 
             if search_results['matches'] and search_results['matches'][0]['score'] >= SIMILARITY_THRESHOLD:
                 context = " ".join([match['metadata']['text'] for match in search_results['matches']])
-                prompt_to_use = f"{AI_PERSONA_AND_RULES}\n\nCONVERSATIONAL HISTORY:\n{formatted_history}\n\nCONTEXT FROM DOCUMENTS:\n{context}\n\n**Final Instruction:** Based on the history and context, respond to the \"USER'S LATEST MESSAGE\".\n\nUSER'S LATEST MESSAGE:\n{user_query}"
+                prompt_to_use = f"{AI_PERSONA_AND_RULES}\n\nCONVERSATIONAL HISTORY:\n{formatted_history}\n\nCONTEXT FROM DOCUMENTS:\n{context}\n\nUSER'S LATEST MESSAGE:\n{user_query}"
             else:
-                prompt_to_use = f"{AI_PERSONA_AND_RULES}\n\nCONVERSATIONAL HISTORY:\n{formatted_history}\n\n**Final Instruction:** Respond to the user's message naturally, as no specific context was found.\n\nUSER'S LATEST MESSAGE:\n{user_query}"
+                prompt_to_use = f"{AI_PERSONA_AND_RULES}\n\nCONVERSATIONAL HISTORY:\n{formatted_history}\n\nCONTEXT FROM DOCUMENTS:\n[No relevant context found]\n\nUSER'S LATEST MESSAGE:\n{user_query}"
             
             response = model.generate_content(prompt_to_use)
             ai_answer = response.text
