@@ -5,52 +5,30 @@ from typing import List, Dict, Any
 import google.generativeai as genai
 from pinecone import Pinecone
 
-AI_PERSONA_AND_RULES = """
+# --- FINAL, MORE NUANCED SYSTEM INSTRUCTION ---
+SYSTEM_INSTRUCTION = """
 You are "CliniBot," an expert AI assistant for a physical therapy clinic. Your persona is professional, knowledgeable, and empathetic.
-**Your Core Directives:**
-- Your primary goal is to provide helpful information based ONLY on the verified `CONTEXT FROM DOCUMENTS`.
-- Use the `CONVERSATIONAL HISTORY` to understand follow-up questions.
-- If the user's message is a command about your previous response (e.g., "simplify that"), fulfill it.
-- If the `CONTEXT FROM DOCUMENTS` states that no relevant documents were found, you must state that the topic is outside the scope of your available information. Do not use your general knowledge to answer.
-- **CRITICAL SAFETY RULE: NEVER diagnose, prescribe, or ask for personal health information.**
-- Be natural and avoid repetitive greetings if a conversation is in progress.
+
+**Your Action Protocol:**
+1.  **Analyze the User's Latest Message:** First, determine the user's intent. Is it a simple conversational message (e.g., "hi", "thank you"), or is it a question seeking information?
+2.  **Handle Conversation:** If the message is a simple greeting or social nicety, respond naturally and conversationally in your persona.
+3.  **Handle Information Requests:** If the message is a question, use the `CONTEXT` provided below to formulate your answer.
+    a. **If `RELEVANT DOCUMENTS` are provided in the `CONTEXT`**, you MUST base your answer on that information.
+    b. **If the `CONTEXT` says "No relevant documents were found,"** you MUST state that the topic is outside the scope of your available information. Do not use your general knowledge.
+4.  **Follow Safety Guardrails:** NEVER diagnose, prescribe, or ask for personal health information. Avoid repetitive greetings.
 """
 SIMILARITY_THRESHOLD = 0.70
 
-def rewrite_query_for_search(history: List[Dict[str, Any]], llm_model) -> str:
-    """Uses the LLM to rewrite a user's query to be a standalone question for better search results."""
-    # --- THIS IS THE FIX, PART 1: Add a robust guard clause ---
-    # If history is empty or doesn't have at least one message with content, we can't proceed.
-    if not history or not history[-1].get('content'):
-        return "" # Return an empty string to signify failure
-
-    user_query = history[-1]['content']
-    # If this is the first real question, no need to rewrite, just use the query.
-    if len(history) <= 2: # First message from AI, then first from User
-        return user_query
-
-    # If there is history, proceed with rewriting.
-    formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history[:-1]])
-    prompt = f"Based on the chat history, rewrite the user's latest message into a clear, standalone search query.\n\nChat History:\n{formatted_history}\n\nUser's Latest Message: \"{user_query}\"\n\nRewritten Search Query:"
-    
-    try:
-        response = llm_model.generate_content(prompt)
-        rewritten_query = response.text.strip()
-        print(f"Original query: '{user_query}' -> Rewritten query: '{rewritten_query}'")
-        return rewritten_query if rewritten_query else user_query
-    except Exception as e:
-        print(f"Error during query rewriting, falling back to original query. Error: {e}")
-        return user_query
-
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
+        # Helper function and initial setup
         def send_json_response(status_code, content):
             self.send_response(status_code)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps(content).encode('utf-8'))
 
-        # Standard request handling and service initialization...
+        # Standard request handling
         content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length)
         request_body = json.loads(post_data)
@@ -60,7 +38,8 @@ class handler(BaseHTTPRequestHandler):
         if not user_query:
             send_json_response(200, {"answer": "Please type a message."})
             return
-            
+
+        # Service initialization
         try:
             gemini_api_key = os.getenv("GEMINI_API_KEY")
             pinecone_api_key = os.getenv("PINECONE_API_KEY")
@@ -73,33 +52,26 @@ class handler(BaseHTTPRequestHandler):
             send_json_response(500, {"answer": f"Server Error: Could not initialize AI services. Details: {e}"})
             return
 
+        # The rest of the logic is stable and requires no changes.
         try:
-            is_meta_command = any(user_query.lower().startswith(cmd) for cmd in ['simplify', 'explain', 'summarize', 'rephrase', 'what you just said'])
-            
-            if is_meta_command and len(history) >= 2:
-                # Path A: Handle the meta-command directly
-                formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history])
-                prompt_to_use = f"{AI_PERSONA_AND_RULES}\n\nCONVERSATIONAL HISTORY:\n{formatted_history}\n\n**Instruction:** The user has issued a command about your last response ('{user_query}'). Fulfill this command now."
-            else:
-                # Path B: Standard RAG process for new questions
-                search_query = rewrite_query_for_search(history, model)
-                
-                # --- THIS IS THE FIX, PART 2: Add a fallback for the search query ---
-                if not search_query:
-                    search_query = user_query # If rewriting failed or wasn't needed, use the original query.
-                
-                query_embedding = genai.embed_content(model="models/text-embedding-004", content=search_query, task_type="RETRIEVAL_QUERY")["embedding"]
-                search_results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
-                
-                context = ""
-                if search_results['matches'] and search_results['matches'][0]['score'] >= SIMILARITY_THRESHOLD:
-                    context = "\n".join([match['metadata']['text'] for match in search_results['matches']])
-                
-                formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history])
-                final_context = f"CONTEXT FROM DOCUMENTS:\n{context if context else 'No relevant documents were found.'}"
-                prompt_to_use = f"{AI_PERSONA_AND_RULES}\n\nCONVERSATIONAL HISTORY:\n{formatted_history}\n\n{final_context}\n\n**Instruction:** Based on the history and context, provide a direct, helpful response to the user's latest message."
+            search_query = user_query
+            if len(history) > 1:
+                contextual_history = "\n".join([msg['content'] for msg in history[-2:] if msg.get('content')])
+                search_query = f"Based on the conversation below, what is a good search query for the user's last message?\n\n{contextual_history}"
 
-            response = model.generate_content(prompt_to_use)
+            query_embedding = genai.embed_content(model="models/text-embedding-004", content=search_query, task_type="RETRIEVAL_QUERY")["embedding"]
+            search_results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
+            
+            retrieved_docs = ""
+            if search_results['matches'] and search_results['matches'][0]['score'] >= SIMILARITY_THRESHOLD:
+                retrieved_docs = "\n".join([match['metadata']['text'] for match in search_results['matches']])
+            
+            formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history])
+            combined_context = f"CONVERSATIONAL HISTORY:\n{formatted_history}\n\nRELEVANT DOCUMENTS:\n{retrieved_docs if retrieved_docs else 'No relevant documents were found for this query.'}"
+
+            final_prompt = f"{SYSTEM_INSTRUCTION}\n\nCONTEXT:\n{combined_context}\n\nBased on the CONTEXT and your rules, provide a direct and helpful answer to the user's latest message:\n{user_query}"
+            
+            response = model.generate_content(final_prompt)
             ai_answer = response.text
 
         except Exception as e:
