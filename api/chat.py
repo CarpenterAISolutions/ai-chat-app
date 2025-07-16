@@ -1,82 +1,100 @@
 # api/chat.py
-from http.server import BaseHTTPRequestHandler
-import json
 import os
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
 import google.generativeai as genai
 from pinecone import Pinecone
+from typing import List, Dict, Any
 
-class handler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        # --- 1. Read the incoming request, which now contains the full history ---
-        content_length = int(self.headers['Content-Length'])
-        post_data = self.rfile.read(content_length)
-        request_body = json.loads(post_data)
-        full_history = request_body.get('history', [])
+# --- Pydantic Models for Robust Data Validation ---
+class Part(BaseModel):
+    text: str
 
-        # --- 2. Securely get API Keys and configure services ---
-        try:
-            gemini_api_key = os.getenv("GEMINI_API_KEY")
-            pinecone_api_key = os.getenv("PINECONE_API_KEY")
-            pinecone_index_name = "physical-therapy-index"
+class Message(BaseModel):
+    role: str
+    parts: List[Part]
 
-            if not all([gemini_api_key, pinecone_api_key]):
-                raise ValueError("API keys are not configured correctly.")
+class ChatRequest(BaseModel):
+    history: List[Message]
 
-            genai.configure(api_key=gemini_api_key)
-            pc = Pinecone(api_key=pinecone_api_key)
-            index = pc.Index(pinecone_index_name)
-        except Exception as e:
-            self.send_error(500, f"Server Configuration Error: {e}")
-            return
+# --- FastAPI App Initialization ---
+app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-        # --- 3. Perform RAG search based on the LATEST user query ---
-        context = ""
-        try:
-            # The latest query is the last message in the history
-            latest_user_query = full_history[-1]['parts'][0]['text']
+# --- Main Chat Endpoint ---
+@app.post("/")
+async def handle_chat(chat_request: ChatRequest):
+    # --- 1. Securely Initialize Services with Robust Error Handling ---
+    try:
+        gemini_api_key = os.getenv("GEMINI_API_KEY")
+        pinecone_api_key = os.getenv("PINECONE_API_KEY")
+        pinecone_index_name = "physical-therapy-index"
 
-            query_embedding = genai.embed_content(
-                model="models/text-embedding-004",
-                content=latest_user_query,
-                task_type="RETRIEVAL_QUERY"
-            )["embedding"]
+        if not all([gemini_api_key, pinecone_api_key]):
+            raise HTTPException(status_code=500, detail="Server Configuration Error: API keys are not set.")
 
-            search_results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
-            context = " ".join([match['metadata']['text'] for match in search_results['matches']])
-        except Exception as e:
-            # If search fails, we can still proceed without context
-            print(f"RAG Search Warning: {str(e)}")
-            context = "Could not retrieve context from the knowledge base."
+        genai.configure(api_key=gemini_api_key)
+        pc = Pinecone(api_key=pinecone_api_key)
 
-        # --- 4. Generate the Final Conversational Response ---
-        try:
-            # Initialize the model and start a chat session with the full history
-            model = genai.GenerativeModel('gemini-1.5-flash-latest')
-            chat_session = model.start_chat(history=full_history[:-1]) # History WITHOUT the latest query
+        if pinecone_index_name not in pc.list_indexes().names():
+            raise HTTPException(status_code=500, detail="Knowledge Base Error: Pinecone index not found.")
 
-            # This improved prompt is more robust and conversational
-            final_prompt = f"""
-            You are "Clinibot," a helpful and empathetic AI assistant for a physical therapy clinic.
-            Your personality is professional, clear, and concise.
-            First, consider the user's latest message: "{latest_user_query}".
-            Next, consider the following relevant context from our clinic's documents: "{context}".
-            Finally, consider the entire previous conversation history to understand the flow.
+        index = pc.Index(pinecone_index_name)
 
-            Synthesize all of this information to provide the best possible response.
-            If the context doesn't contain enough information to answer, state that you cannot find specific information
-            in the clinic's documents and advise consulting a therapist. Do not make up information.
-            If the user asks to simplify or explain something, use the conversation history to understand what "that" refers to.
-            """
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Initialization Error: {str(e)}")
 
-            response = chat_session.send_message(final_prompt)
-            ai_answer = response.text
-        except Exception as e:
-            ai_answer = f"An error occurred with the AI service: {e}"
+    # --- 2. Safely Extract History and Latest Query ---
+    # ** THE FIX IS HERE **
+    # We define latest_user_query OUTSIDE the try block so it's always available.
+    try:
+        full_history = [message.dict() for message in chat_request.history]
+        latest_user_query = full_history[-1]['parts'][0]['text']
+    except (IndexError, KeyError) as e:
+        raise HTTPException(status_code=400, detail=f"Invalid request format: {str(e)}")
 
-        # --- 5. Send the final response ---
-        self.send_response(200)
-        self.send_header('Content-type', 'application/json')
-        self.end_headers()
-        response_data = {"answer": ai_answer}
-        self.wfile.write(json.dumps(response_data).encode('utf-8'))
-        return
+    # --- 3. Perform RAG Search with Error Handling ---
+    context = ""
+    try:
+        query_embedding = genai.embed_content(
+            model="models/text-embedding-004",
+            content=latest_user_query,
+            task_type="RETRIEVAL_QUERY"
+        )["embedding"]
+
+        search_results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
+        context = " ".join([match['metadata']['text'] for match in search_results['matches']])
+    except Exception as e:
+        print(f"RAG Search Warning: {str(e)}")
+        context = "Could not retrieve context from the knowledge base."
+
+    # --- 4. Generate Conversational Response with a Refined Prompt ---
+    try:
+        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        chat_session = model.start_chat(history=full_history[:-1])
+
+        final_prompt = f"""
+        You are "Clinibot," a helpful and empathetic AI assistant for a physical therapy clinic.
+        Your personality is professional, clear, and concise.
+        First, consider the user's latest message: "{latest_user_query}".
+        Next, consider the following relevant context from our clinic's documents: "{context}".
+        Finally, consider the entire previous conversation history to understand the flow.
+
+        Synthesize all of this information to provide the best possible response.
+        If the context does not contain enough information to answer the question,
+        state that you cannot find specific information in the clinic's documents and advise consulting a therapist.
+        Do not make up information.
+        If the user asks to simplify or explain something, use the conversation history to understand what "that" refers to.
+        """
+
+        response = chat_session.send_message(final_prompt)
+        return {"answer": response.text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"AI Generation Error: {str(e)}")
