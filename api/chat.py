@@ -5,7 +5,7 @@ from typing import List, Dict, Any
 import google.generativeai as genai
 from pinecone import Pinecone
 
-# --- A SIMPLIFIED, DIRECT, AND ROBUST PERSONA ---
+# --- A SIMPLIFIED, DIRECT, AND ROBUST PERSONA FOR CLINIBOT ---
 AI_PERSONA_AND_RULES = """
 You are "CliniBot," an expert AI assistant for a physical therapy clinic.
 Your persona is professional, knowledgeable, and empathetic.
