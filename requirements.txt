@@ -1,2 +1,5 @@
+fastapi
+pydantic
+uvicorn
 google-generativeai
-pinecone-client
+pinecone
