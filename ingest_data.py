@@ -1,3 +1,4 @@
+# ingest_data.py (Final Production Version)
 import os
 import re
 from dotenv import load_dotenv
@@ -18,8 +19,6 @@ def chunk_text(text: str) -> List[str]:
 
 def main():
     print(f"--- Starting Ingestion Process for '{PINECONE_INDEX_NAME}' ---")
-
-    # 1. Initialize Services
     try:
         pinecone_api_key = os.getenv("PINECONE_API_KEY")
         gemini_api_key = os.getenv("GEMINI_API_KEY")
@@ -37,32 +36,20 @@ def main():
         index = pc.Index(PINECONE_INDEX_NAME)
         print("✅ Services connected successfully.")
 
-    except Exception as e:
-        print(f"❌ ERROR: Failed to initialize services: {e}")
-        return
-
-    # 2. Load and Chunk Data
-    print(f"Reading and chunking data from '{SOURCE_DATA_FILE}'...")
-    try:
+        print(f"Reading and chunking data from '{SOURCE_DATA_FILE}'...")
         with open(SOURCE_DATA_FILE, 'r', encoding='utf-8') as f:
             text_data = f.read()
         text_chunks = chunk_text(text_data)
         print(f"✅ Found {len(text_chunks)} text chunks.")
-    except FileNotFoundError:
-        print(f"❌ ERROR: The file '{SOURCE_DATA_FILE}' was not found. Exiting.")
-        return
-    
-    # 3. Clear and Upload to Pinecone
-    print("Clearing all old data from the index...")
-    index.delete(delete_all=True)
-    print("✅ Index cleared.")
 
-    print("Generating embeddings and uploading new chunks...")
-    batch_size = 100
-    for i in range(0, len(text_chunks), batch_size):
-        batch_chunks = text_chunks[i:i + batch_size]
-        # --- This whole try/except block must be copied correctly ---
-        try:
+        print("Clearing all old data from the index...")
+        index.delete(delete_all=True)
+        print("✅ Index cleared.")
+
+        print("Generating embeddings and uploading new chunks...")
+        batch_size = 100
+        for i in range(0, len(text_chunks), batch_size):
+            batch_chunks = text_chunks[i:i + batch_size]
             print(f"  - Processing batch {i//batch_size + 1}...")
             response = genai.embed_content(
                 model=EMBEDDING_MODEL,
@@ -70,18 +57,18 @@ def main():
                 task_type="RETRIEVAL_DOCUMENT"
             )
             embeddings = response['embedding']
-
             vectors_to_upsert = [
                 {"id": f"chunk_{i+j}", "values": emb, "metadata": {"text": chunk}}
                 for j, (chunk, emb) in enumerate(zip(batch_chunks, embeddings))
             ]
             index.upsert(vectors=vectors_to_upsert)
-        except Exception as e:
-            print(f"    ⚠️ Failed to process batch {i//batch_size + 1}. Error: {e}")
-            continue # This allows the script to continue even if one batch fails
-        # -----------------------------------------------------------
+        
+        print(f"✅ Ingestion complete. Vector count: {index.describe_index_stats()['total_vector_count']}")
 
-    print(f"✅ Ingestion complete. Check Pinecone for updated vector count.")
+    except FileNotFoundError:
+        print(f"❌ ERROR: The file '{SOURCE_DATA_FILE}' was not found. Exiting.")
+    except Exception as e:
+        print(f"❌ An unexpected error occurred: {e}")
 
 if __name__ == "__main__":
     main()
