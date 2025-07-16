@@ -5,30 +5,28 @@ from typing import List, Dict, Any
 import google.generativeai as genai
 from pinecone import Pinecone
 
-# --- FINAL, MORE NUANCED SYSTEM INSTRUCTION ---
+# --- Final Production Persona and Rules ---
 SYSTEM_INSTRUCTION = """
 You are "CliniBot," an expert AI assistant for a physical therapy clinic. Your persona is professional, knowledgeable, and empathetic.
+Your primary goal is to answer the user's question based on the provided `CONTEXT`. The `CONTEXT` contains relevant documents from the clinic and the recent conversation history.
 
-**Your Action Protocol:**
-1.  **Analyze the User's Latest Message:** First, determine the user's intent. Is it a simple conversational message (e.g., "hi", "thank you"), or is it a question seeking information?
-2.  **Handle Conversation:** If the message is a simple greeting or social nicety, respond naturally and conversationally in your persona.
-3.  **Handle Information Requests:** If the message is a question, use the `CONTEXT` provided below to formulate your answer.
-    a. **If `RELEVANT DOCUMENTS` are provided in the `CONTEXT`**, you MUST base your answer on that information.
-    b. **If the `CONTEXT` says "No relevant documents were found,"** you MUST state that the topic is outside the scope of your available information. Do not use your general knowledge.
-4.  **Follow Safety Guardrails:** NEVER diagnose, prescribe, or ask for personal health information. Avoid repetitive greetings.
+**Your Rules:**
+- You MUST base your answers on the information found in the `CONTEXT`.
+- If the `CONTEXT` says no relevant documents were found, state that the topic is outside the scope of your available information.
+- NEVER diagnose, prescribe, or give medical advice that is not explicitly in the `CONTEXT`.
+- NEVER ask for personal health information.
 """
 SIMILARITY_THRESHOLD = 0.70
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
-        # Helper function and initial setup
         def send_json_response(status_code, content):
             self.send_response(status_code)
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps(content).encode('utf-8'))
 
-        # Standard request handling
+        # Standard request handling and service initialization...
         content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length)
         request_body = json.loads(post_data)
@@ -38,8 +36,7 @@ class handler(BaseHTTPRequestHandler):
         if not user_query:
             send_json_response(200, {"answer": "Please type a message."})
             return
-
-        # Service initialization
+            
         try:
             gemini_api_key = os.getenv("GEMINI_API_KEY")
             pinecone_api_key = os.getenv("PINECONE_API_KEY")
@@ -52,12 +49,10 @@ class handler(BaseHTTPRequestHandler):
             send_json_response(500, {"answer": f"Server Error: Could not initialize AI services. Details: {e}"})
             return
 
-        # The rest of the logic is stable and requires no changes.
         try:
+            # The search query is ALWAYS the user's direct query. This is simple and reliable.
             search_query = user_query
-            if len(history) > 1:
-                contextual_history = "\n".join([msg['content'] for msg in history[-2:] if msg.get('content')])
-                search_query = f"Based on the conversation below, what is a good search query for the user's last message?\n\n{contextual_history}"
+            print(f"Searching for: '{search_query}'")
 
             query_embedding = genai.embed_content(model="models/text-embedding-004", content=search_query, task_type="RETRIEVAL_QUERY")["embedding"]
             search_results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
@@ -69,7 +64,7 @@ class handler(BaseHTTPRequestHandler):
             formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history])
             combined_context = f"CONVERSATIONAL HISTORY:\n{formatted_history}\n\nRELEVANT DOCUMENTS:\n{retrieved_docs if retrieved_docs else 'No relevant documents were found for this query.'}"
 
-            final_prompt = f"{SYSTEM_INSTRUCTION}\n\nCONTEXT:\n{combined_context}\n\nBased on the CONTEXT and your rules, provide a direct and helpful answer to the user's latest message:\n{user_query}"
+            final_prompt = f"{SYSTEM_INSTRUCTION}\n\nCONTEXT:\n{combined_context}\n\nBased on the CONTEXT, provide a direct and helpful answer to the user's latest message:\n{user_query}"
             
             response = model.generate_content(final_prompt)
             ai_answer = response.text
