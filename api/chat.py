@@ -5,14 +5,13 @@ from typing import List, Dict, Any
 import google.generativeai as genai
 from pinecone import Pinecone
 
-# --- Final AI Persona and Rules ---
 AI_PERSONA_AND_RULES = """
 You are "CliniBot," an expert AI assistant for a physical therapy clinic. Your persona is professional, knowledgeable, and empathetic.
 **Your Core Directives:**
 - Your primary goal is to provide helpful information based ONLY on the verified `CONTEXT FROM DOCUMENTS`.
 - Use the `CONVERSATIONAL HISTORY` to understand follow-up questions.
 - If the user's message is a command about your previous response (e.g., "simplify that"), fulfill it.
-- If the `CONTEXT FROM DOCUMENTS` section says "[No relevant documents were found]," you must state that the topic is outside the scope of your available information. Do not use your general knowledge to answer.
+- If the `CONTEXT FROM DOCUMENTS` states that no relevant documents were found, you must state that the topic is outside the scope of your available information. Do not use your general knowledge to answer.
 - **CRITICAL SAFETY RULE: NEVER diagnose, prescribe, or ask for personal health information.**
 - Be natural and avoid repetitive greetings if a conversation is in progress.
 """
@@ -20,15 +19,19 @@ SIMILARITY_THRESHOLD = 0.70
 
 def rewrite_query_for_search(history: List[Dict[str, Any]], llm_model) -> str:
     """Uses the LLM to rewrite a user's query to be a standalone question for better search results."""
-    # The user's latest query is the last message in the history list.
-    user_query = history[-1]['content']
+    # --- THIS IS THE FIX, PART 1: Add a robust guard clause ---
+    # If history is empty or doesn't have at least one message with content, we can't proceed.
+    if not history or not history[-1].get('content'):
+        return "" # Return an empty string to signify failure
 
-    # If this is the first real question, no need to rewrite.
+    user_query = history[-1]['content']
+    # If this is the first real question, no need to rewrite, just use the query.
     if len(history) <= 2: # First message from AI, then first from User
         return user_query
 
+    # If there is history, proceed with rewriting.
     formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history[:-1]])
-    prompt = f"Based on the chat history, rewrite the user's latest message into a clear, standalone search query that can be understood without the previous context.\n\nChat History:\n{formatted_history}\n\nUser's Latest Message: \"{user_query}\"\n\nRewritten Search Query:"
+    prompt = f"Based on the chat history, rewrite the user's latest message into a clear, standalone search query.\n\nChat History:\n{formatted_history}\n\nUser's Latest Message: \"{user_query}\"\n\nRewritten Search Query:"
     
     try:
         response = llm_model.generate_content(prompt)
@@ -47,6 +50,7 @@ class handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(content).encode('utf-8'))
 
+        # Standard request handling and service initialization...
         content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length)
         request_body = json.loads(post_data)
@@ -70,16 +74,20 @@ class handler(BaseHTTPRequestHandler):
             return
 
         try:
-            # Step 1: Check for Meta-Command using simple, reliable code
             is_meta_command = any(user_query.lower().startswith(cmd) for cmd in ['simplify', 'explain', 'summarize', 'rephrase', 'what you just said'])
             
-            if is_meta_command and len(history) > 1:
+            if is_meta_command and len(history) >= 2:
                 # Path A: Handle the meta-command directly
                 formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history])
                 prompt_to_use = f"{AI_PERSONA_AND_RULES}\n\nCONVERSATIONAL HISTORY:\n{formatted_history}\n\n**Instruction:** The user has issued a command about your last response ('{user_query}'). Fulfill this command now."
             else:
                 # Path B: Standard RAG process for new questions
                 search_query = rewrite_query_for_search(history, model)
+                
+                # --- THIS IS THE FIX, PART 2: Add a fallback for the search query ---
+                if not search_query:
+                    search_query = user_query # If rewriting failed or wasn't needed, use the original query.
+                
                 query_embedding = genai.embed_content(model="models/text-embedding-004", content=search_query, task_type="RETRIEVAL_QUERY")["embedding"]
                 search_results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
                 
