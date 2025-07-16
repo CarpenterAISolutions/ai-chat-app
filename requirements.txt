@@ -1,4 +1,0 @@
-fastapi
-pydantic
-google-generativeai
-pinecone
