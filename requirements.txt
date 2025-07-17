@@ -1,5 +1,3 @@
-# requirements.txt
-
 google-generativeai
 pinecone
 python-dotenv
