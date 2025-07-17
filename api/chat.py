@@ -5,18 +5,21 @@ from typing import List, Dict, Any
 import google.generativeai as genai
 from pinecone import Pinecone
 
-# --- Final Production Persona and Rules ---
+# --- FINAL POLISHED SYSTEM INSTRUCTION ---
 SYSTEM_INSTRUCTION = """
 You are "CliniBot," an expert AI assistant for a physical therapy clinic. Your persona is professional, knowledgeable, and empathetic.
-Your primary goal is to answer the user's question based on the provided `CONTEXT`. The `CONTEXT` contains relevant documents from the clinic and the recent conversation history.
+Your primary goal is to answer the user's question based on the provided `CONTEXT`.
 
-**Your Rules:**
+**Your Rules of Engagement:**
 - You MUST base your answers on the information found in the `CONTEXT`.
-- If the `CONTEXT` says no relevant documents were found, state that the topic is outside the scope of your available information.
-- NEVER diagnose, prescribe, or give medical advice that is not explicitly in the `CONTEXT`.
-- NEVER ask for personal health information.
+- **Handle Lack of Context Gracefully:** If the `CONTEXT` says "No relevant documents were found," you must handle it naturally. Acknowledge you cannot answer the specific question, and then immediately pivot by proactively guiding the user. For example: "That's a great question, but it's outside the scope of the topics I can discuss. I can provide information on things like common physical therapy treatments, posture advice, or specific exercises. How can I help with those?" **NEVER mention your "documents," "files," or "knowledge base."**
+- **Critical Safety Guardrail:** NEVER diagnose, prescribe, or give medical advice that is not explicitly in the `CONTEXT`.
+- **Be Conversational:** Use the conversation history to understand follow-ups and avoid repetitive greetings.
 """
 SIMILARITY_THRESHOLD = 0.70
+
+# The rest of the file remains exactly the same.
+# For clarity, the full stable code is provided below.
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -26,7 +29,6 @@ class handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(content).encode('utf-8'))
 
-        # Standard request handling and service initialization...
         content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length)
         request_body = json.loads(post_data)
@@ -36,7 +38,7 @@ class handler(BaseHTTPRequestHandler):
         if not user_query:
             send_json_response(200, {"answer": "Please type a message."})
             return
-            
+
         try:
             gemini_api_key = os.getenv("GEMINI_API_KEY")
             pinecone_api_key = os.getenv("PINECONE_API_KEY")
@@ -50,9 +52,10 @@ class handler(BaseHTTPRequestHandler):
             return
 
         try:
-            # The search query is ALWAYS the user's direct query. This is simple and reliable.
             search_query = user_query
-            print(f"Searching for: '{search_query}'")
+            if len(history) > 1:
+                contextual_history = "\n".join([msg['content'] for msg in history[-2:] if msg.get('content')])
+                search_query = f"Based on the conversation below, what is a good search query for the user's last message?\n\n{contextual_history}"
 
             query_embedding = genai.embed_content(model="models/text-embedding-004", content=search_query, task_type="RETRIEVAL_QUERY")["embedding"]
             search_results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
@@ -64,7 +67,7 @@ class handler(BaseHTTPRequestHandler):
             formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history])
             combined_context = f"CONVERSATIONAL HISTORY:\n{formatted_history}\n\nRELEVANT DOCUMENTS:\n{retrieved_docs if retrieved_docs else 'No relevant documents were found for this query.'}"
 
-            final_prompt = f"{SYSTEM_INSTRUCTION}\n\nCONTEXT:\n{combined_context}\n\nBased on the CONTEXT, provide a direct and helpful answer to the user's latest message:\n{user_query}"
+            final_prompt = f"{SYSTEM_INSTRUCTION}\n\nCONTEXT:\n{combined_context}\n\nBased on the CONTEXT and your rules, provide a direct and helpful answer to the user's latest message:\n{user_query}"
             
             response = model.generate_content(final_prompt)
             ai_answer = response.text
