@@ -5,77 +5,108 @@ from typing import List, Dict, Any
 import google.generativeai as genai
 from pinecone import Pinecone
 
-# --- Final AI Persona (Simplified for clarity) ---
-AI_PERSONA = "You are 'CliniBot,' an expert AI assistant for a physical therapy clinic. Your persona is professional, knowledgeable, and empathetic."
+# --- THE FINAL, OPTIMIZED SYSTEM PROMPT ---
+SYSTEM_INSTRUCTION = """
+You are "CliniBot," an expert AI assistant for a physical therapy clinic. Your persona is professional, knowledgeable, and empathetic.
+
+Follow this thought process to generate your response:
+Step 1: Analyze the user's latest message in the context of the conversation history.
+Step 2: Is the message a simple greeting, thank you, or social nicety? If so, respond conversationally.
+Step 3: Is the message a command about your immediately preceding response (e.g., "simplify that", "tell me more")? If so, fulfill the command using the context from your last response.
+Step 4: If it's a new question, use the user's query to determine the topic. Then, synthesize an answer using the `RELEVANT DOCUMENTS` as your primary source of truth.
+Step 5: If no relevant documents are found, state that the topic is outside your scope and suggest topics you can discuss.
+Step 6: At all times, adhere to your safety rules: NEVER diagnose, prescribe, or ask for personal health information. Avoid repetitive greetings.
+
+Here are examples of how to apply these rules:
+
+---
+EXAMPLE 1
+CONVERSATIONAL HISTORY:
+User: Tell me about the RICE method
+CliniBot: The R.I.C.E. method is a first-aid treatment... (long explanation)
+USER'S LATEST MESSAGE:
+can you simplify that?
+
+YOUR RESPONSE:
+Of course. In short, the R.I.C.E. method means Rest the injury, apply Ice, use Compression with a bandage, and Elevate the injured area.
+---
+EXAMPLE 2
+CONVERSATIONAL HISTORY:
+(empty)
+USER'S LATEST MESSAGE:
+hi
+
+YOUR RESPONSE:
+Hello! I'm CliniBot. How can I help you today?
+---
+"""
+
 SIMILARITY_THRESHOLD = 0.70
 
-# --- Helper Functions for the new multi-step logic ---
+class handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        def send_json_response(status_code, content):
+            self.send_response(status_code)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(content).encode('utf-8'))
 
-def classify_intent(history: List[Dict[str, Any]], llm_model) -> str:
-    """Uses the LLM to classify the user's intent."""
-    user_query = history[-1]['content']
-    
-    # Simple keyword check for performance
-    if user_query.lower() in ['hi', 'hello', 'hey', 'thanks', 'thank you']:
-        return "GREETING"
-    if any(cmd in user_query.lower() for cmd in ['simplify', 'explain', 'summarize', 'rephrase']):
-        return "META_COMMAND"
+        # Standard request handling and service initialization...
+        content_length = int(self.headers.get('Content-Length', 0))
+        post_data = self.rfile.read(content_length)
+        request_body = json.loads(post_data)
+        user_query = request_body.get('query', "").strip()
+        history = request_body.get('history', [])
 
-    # If not a simple keyword, use the LLM for nuanced understanding
-    prompt = f"""
-    Classify the user's "Latest Message" into one of the following categories based on the "Chat History":
-    1. GREETING: A simple greeting or social response (e.g., "hi", "thanks").
-    2. META_COMMAND: A command about your previous response (e.g., "simplify that", "tell me more").
-    3. INFORMATION_REQUEST: A new question or statement seeking information.
-
-    Chat History:
-    {history[:-1]}
-
-    User's Latest Message: "{user_query}"
-
-    Category:
-    """
-    try:
-        response = llm_model.generate_content(prompt)
-        intent = response.text.strip().upper()
-        print(f"Intent classified as: {intent}")
-        if "GREETING" in intent: return "GREETING"
-        if "META_COMMAND" in intent: return "META_COMMAND"
-        return "INFORMATION_REQUEST"
-    except Exception:
-        return "INFORMATION_REQUEST" # Default to information request on error
-
-def handle_meta_command(history: List[Dict[str, Any]], llm_model) -> str:
-    """Handles commands like 'simplify that'."""
-    formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history])
-    prompt = f"{AI_PERSONA}\n\nCONVERSATIONAL HISTORY:\n{history}\n\n**Instruction:** The user has issued a command about your last response. Fulfill their command now."
-    response = llm_model.generate_content(prompt)
-    return response.text
-
-def get_rag_response(history: List[Dict[str, Any]], llm_model, pinecone_index) -> str:
-    """Handles the full RAG process for information requests."""
-    user_query = history[-1]['content']
-    search_query = user_query # Start with the direct query
-
-    # For follow-ups, create a better search query
-    if len(history) > 2:
+        if not user_query:
+            send_json_response(200, {"answer": "Please type a message."})
+            return
+            
         try:
-            formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history[:-1]])
-            rewrite_prompt = f"Based on the chat history, rewrite the user's latest message into a clear, standalone search query.\n\nChat History:\n{formatted_history}\n\nUser's Latest Message: \"{user_query}\"\n\nRewritten Search Query:"
-            response = llm_model.generate_content(rewrite_prompt)
-            search_query = response.text.strip()
-            print(f"Rewritten search query: '{search_query}'")
-        except Exception:
-            pass # Use original query if rewrite fails
+            gemini_api_key = os.getenv("GEMINI_API_KEY")
+            pinecone_api_key = os.getenv("PINECONE_API_KEY")
+            pinecone_index_name = "physical-therapy-index"
+            genai.configure(api_key=gemini_api_key)
+            pc = Pinecone(api_key=pinecone_api_key)
+            index = pc.Index(pinecone_index_name)
+            model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        except Exception as e:
+            send_json_response(500, {"answer": f"Server Error: Could not initialize AI services. Details: {e}"})
+            return
 
-    # Search Pinecone
-    query_embedding = genai.embed_content(model="models/text-embedding-004", content=search_query, task_type="RETRIEVAL_QUERY")["embedding"]
-    search_results = pinecone_index.query(vector=query_embedding, top_k=3, include_metadata=True)
-    
-    context_docs = ""
-    if search_results['matches'] and search_results['matches'][0]['score'] >= SIMILARITY_THRESHOLD:
-        context_docs = "\n".join([match['metadata']['text'] for match in search_results['matches']])
-    
-    # Generate final answer
-    formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history])
-    final_context = f"RELEVANT DOCUMENTS:\
+        try:
+            # We revert to a simple, reliable search query.
+            search_query = user_query
+            
+            query_embedding = genai.embed_content(model="models/text-embedding-004", content=search_query, task_type="RETRIEVAL_QUERY")["embedding"]
+            search_results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
+            
+            retrieved_docs = ""
+            if search_results['matches'] and search_results['matches'][0]['score'] >= SIMILARITY_THRESHOLD:
+                retrieved_docs = "\n".join([match['metadata']['text'] for match in search_results['matches']])
+            
+            # The full history is passed to the AI for its reasoning process
+            formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history])
+            
+            # A single, powerful prompt that gives the AI all context and instructions at once.
+            final_prompt = f"""
+            {SYSTEM_INSTRUCTION}
+
+            ### CONTEXT FOR YOUR RESPONSE ###
+            CONVERSATIONAL HISTORY:
+            {formatted_history}
+
+            RELEVANT DOCUMENTS:
+            {retrieved_docs if retrieved_docs else "No relevant documents were found for this query."}
+            
+            USER'S LATEST MESSAGE:
+            {user_query}
+            """
+            
+            response = model.generate_content(final_prompt)
+            ai_answer = response.text
+
+        except Exception as e:
+            ai_answer = f"An error occurred during the RAG process: {e}"
+
+        send_json_response(200, {"answer": ai_answer})
