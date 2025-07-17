@@ -5,16 +5,17 @@ from typing import List, Dict, Any
 import google.generativeai as genai
 from pinecone import Pinecone
 
-# A clear and direct set of instructions for the AI
+# --- Final Production Persona and Rules ---
 SYSTEM_INSTRUCTION = """
-You are "CliniBot," an expert AI assistant for a physical therapy clinic. Your persona is professional and helpful.
-Your primary goal is to answer the user's question using the `RELEVANT DOCUMENTS` provided.
+You are "CliniBot," an expert AI assistant for a physical therapy clinic. Your persona is professional, knowledgeable, and empathetic.
+Your goal is to provide a helpful and accurate answer based on the information provided to you.
 
-**Your Rules:**
-- Base your answers strictly on the `RELEVANT DOCUMENTS`.
-- If the documents section says "No relevant documents were found," you MUST state that the topic is outside your scope of knowledge and suggest other topics you can help with.
-- Use the `CONVERSATIONAL HISTORY` to understand the context of the user's latest message.
-- NEVER diagnose, prescribe, or ask for personal health information. This is a critical safety rule.
+**Your Action Protocol:**
+1.  Review the `CONVERSATIONAL HISTORY` to understand the flow of the conversation.
+2.  Review the `RELEVANT DOCUMENTS`. This is your primary source of truth.
+3.  Formulate a direct answer to the `USER'S LATEST MESSAGE` using the documents.
+4.  If the documents section states "No relevant documents were found," you MUST inform the user that this topic is outside your scope and then suggest topics you can help with.
+5.  You MUST follow your safety rules at all times: NEVER diagnose, prescribe, or ask for personal health information.
 """
 SIMILARITY_THRESHOLD = 0.70
 
@@ -26,8 +27,8 @@ class handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(content).encode('utf-8'))
 
+        # Standard request handling and service initialization
         try:
-            # --- Standard Request Handling & Service Initialization ---
             content_length = int(self.headers.get('Content-Length', 0))
             post_data = self.rfile.read(content_length)
             request_body = json.loads(post_data)
@@ -45,43 +46,56 @@ class handler(BaseHTTPRequestHandler):
             pc = Pinecone(api_key=pinecone_api_key)
             index = pc.Index(pinecone_index_name)
             model = genai.GenerativeModel('gemini-1.5-flash-latest')
+        except Exception as e:
+            send_json_response(500, {"answer": f"Server Error: Could not initialize services. Details: {e}"})
+            return
 
-            # --- Simplified and Stable RAG Pipeline ---
-            # The search query is always the user's direct query. It's simple and reliable.
+        try:
+            # --- STABLE RAG PIPELINE ---
+            # 1. The search query is ALWAYS the user's direct, clean query.
             search_query = user_query
-            
+            print(f"Searching Pinecone for: '{search_query}'")
+
+            # 2. Search Pinecone for relevant documents
             query_embedding = genai.embed_content(model="models/text-embedding-004", content=search_query, task_type="RETRIEVAL_QUERY")["embedding"]
             search_results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
             
+            # 3. Build the context for the AI
             retrieved_docs = ""
             if search_results['matches'] and search_results['matches'][0]['score'] >= SIMILARITY_THRESHOLD:
+                print(f"Found relevant context with score: {search_results['matches'][0]['score']:.2f}")
                 retrieved_docs = "\n".join([match['metadata']['text'] for match in search_results['matches']])
             
             formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history])
             
-            # A single, clean prompt is sent to the AI
+            combined_context = f"""
+            CONVERSATIONAL HISTORY:
+            {formatted_history}
+
+            RELEVANT DOCUMENTS:
+            {retrieved_docs if retrieved_docs else "No relevant documents were found for this query."}
+            """
+
+            # 4. Construct the final prompt
             final_prompt = f"""
             {SYSTEM_INSTRUCTION}
 
-            ### CONVERSATIONAL HISTORY ###
-            {formatted_history}
+            ---
+            BEGIN CONTEXT
+            {combined_context}
+            END CONTEXT
+            ---
 
-            ### RELEVANT DOCUMENTS ###
-            {retrieved_docs if retrieved_docs else "No relevant documents were found for this query."}
+            Based on the context above, respond to the user's latest message.
 
-            ### USER'S LATEST MESSAGE ###
-            {user_query}
-
-            Please provide your response now:
+            USER'S LATEST MESSAGE: {user_query}
             """
             
-            # A single, fast API call
+            # 5. Generate the final response
             response = model.generate_content(final_prompt)
             ai_answer = response.text
 
         except Exception as e:
-            # A robust catch-all to report any errors instead of crashing
-            print(f"--- [ERROR] An exception occurred: {e} ---") # This will now log to Vercel
-            ai_answer = f"An error occurred on the server. Please try again later."
+            ai_answer = f"An error occurred during the RAG process: {e}"
 
         send_json_response(200, {"answer": ai_answer})
