@@ -5,21 +5,18 @@ from typing import List, Dict, Any
 import google.generativeai as genai
 from pinecone import Pinecone
 
-# --- FINAL POLISHED SYSTEM INSTRUCTION ---
+# --- Final Production Persona and Rules ---
 SYSTEM_INSTRUCTION = """
 You are "CliniBot," an expert AI assistant for a physical therapy clinic. Your persona is professional, knowledgeable, and empathetic.
-Your primary goal is to answer the user's question based on the provided `CONTEXT`.
+Your primary goal is to answer the user's question based on the provided `CONTEXT`. The `CONTEXT` contains relevant documents from the clinic and the recent conversation history.
 
-**Your Rules of Engagement:**
+**Your Rules:**
 - You MUST base your answers on the information found in the `CONTEXT`.
-- **Handle Lack of Context Gracefully:** If the `CONTEXT` says "No relevant documents were found," you must handle it naturally. Acknowledge you cannot answer the specific question, and then immediately pivot by proactively guiding the user. For example: "That's a great question, but it's outside the scope of the topics I can discuss. I can provide information on things like common physical therapy treatments, posture advice, or specific exercises. How can I help with those?" **NEVER mention your "documents," "files," or "knowledge base."**
-- **Critical Safety Guardrail:** NEVER diagnose, prescribe, or give medical advice that is not explicitly in the `CONTEXT`.
-- **Be Conversational:** Use the conversation history to understand follow-ups and avoid repetitive greetings.
+- If the `CONTEXT` says no relevant documents were found, state that the topic is outside the scope of your available information, and then proactively suggest topics you CAN discuss.
+- NEVER diagnose, prescribe, or give medical advice that is not explicitly in the `CONTEXT`.
+- NEVER ask for personal health information.
 """
 SIMILARITY_THRESHOLD = 0.70
-
-# The rest of the file remains exactly the same.
-# For clarity, the full stable code is provided below.
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -29,6 +26,7 @@ class handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(content).encode('utf-8'))
 
+        # Standard request handling and service initialization...
         content_length = int(self.headers.get('Content-Length', 0))
         post_data = self.rfile.read(content_length)
         request_body = json.loads(post_data)
@@ -38,7 +36,7 @@ class handler(BaseHTTPRequestHandler):
         if not user_query:
             send_json_response(200, {"answer": "Please type a message."})
             return
-
+            
         try:
             gemini_api_key = os.getenv("GEMINI_API_KEY")
             pinecone_api_key = os.getenv("PINECONE_API_KEY")
@@ -52,24 +50,34 @@ class handler(BaseHTTPRequestHandler):
             return
 
         try:
-            search_query = user_query
-            if len(history) > 1:
-                contextual_history = "\n".join([msg['content'] for msg in history[-2:] if msg.get('content')])
-                search_query = f"Based on the conversation below, what is a good search query for the user's last message?\n\n{contextual_history}"
+            # --- THE FINAL FIX: A more flexible meta-command check ---
+            meta_keywords = ['simplify', 'explain', 'summarize', 'rephrase', 'in other words', 'what you just said']
+            is_meta_command = any(keyword in user_query.lower() for keyword in meta_keywords)
+            
+            if is_meta_command and len(history) >= 2:
+                # Path A: Handle the meta-command directly
+                formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history])
+                prompt_to_use = f"{SYSTEM_INSTRUCTION}\n\nCONVERSATIONAL HISTORY:\n{formatted_history}\n\n**Instruction:** The user has issued a command about your last response ('{user_query}'). Fulfill this command now by acting on your previous message."
+            else:
+                # Path B: Standard RAG process for new questions
+                search_query = user_query
+                # A simple and reliable way to add context for follow-ups
+                if len(history) >= 2:
+                    last_ai_response = history[-2].get('content', '')
+                    search_query = f"The user is asking about '{user_query}' in the context of the last response: '{last_ai_response}'"
+                
+                query_embedding = genai.embed_content(model="models/text-embedding-004", content=search_query, task_type="RETRIEVAL_QUERY")["embedding"]
+                search_results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
+                
+                context = ""
+                if search_results['matches'] and search_results['matches'][0]['score'] >= SIMILARITY_THRESHOLD:
+                    context = "\n".join([match['metadata']['text'] for match in search_results['matches']])
+                
+                formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history])
+                final_context = f"CONTEXT FROM DOCUMENTS:\n{context if context else 'No relevant documents were found.'}"
+                prompt_to_use = f"{SYSTEM_INSTRUCTION}\n\nCONVERSATIONAL HISTORY:\n{formatted_history}\n\n{final_context}\n\n**Instruction:** Based on the history and context, provide a direct and helpful response to the user's latest message."
 
-            query_embedding = genai.embed_content(model="models/text-embedding-004", content=search_query, task_type="RETRIEVAL_QUERY")["embedding"]
-            search_results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
-            
-            retrieved_docs = ""
-            if search_results['matches'] and search_results['matches'][0]['score'] >= SIMILARITY_THRESHOLD:
-                retrieved_docs = "\n".join([match['metadata']['text'] for match in search_results['matches']])
-            
-            formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history])
-            combined_context = f"CONVERSATIONAL HISTORY:\n{formatted_history}\n\nRELEVANT DOCUMENTS:\n{retrieved_docs if retrieved_docs else 'No relevant documents were found for this query.'}"
-
-            final_prompt = f"{SYSTEM_INSTRUCTION}\n\nCONTEXT:\n{combined_context}\n\nBased on the CONTEXT and your rules, provide a direct and helpful answer to the user's latest message:\n{user_query}"
-            
-            response = model.generate_content(final_prompt)
+            response = model.generate_content(prompt_to_use)
             ai_answer = response.text
 
         except Exception as e:
