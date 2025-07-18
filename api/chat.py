@@ -1,104 +1,46 @@
-# api/chat.py
+# api/index.py
 import os
 import json
-from http.server import BaseHTTPRequestHandler
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
+import google.generativeai as genai
 from pinecone import Pinecone
 from langfuse import Langfuse
-import google.generativeai as genai
+from typing import List, Dict, Any
 
-# --- Constants and System Instructions ---
-SYSTEM_INSTRUCTION = """
-You are "CliniBot," an expert AI assistant for a physical therapy clinic. Your persona is professional, knowledgeable, and empathetic.
-Your primary goal is to answer the user's question based on the provided `CONTEXT`.
+# --- Pydantic Models for Robust Data Validation ---
+class Part(BaseModel):
+    text: str
 
-**Your Rules:**
-- You MUST base your answers on the information found in the `CONTEXT`.
-- If the `CONTEXT` says no relevant documents were found, state that the topic is outside your scope and then proactively suggest topics you can help with.
-- NEVER diagnose, prescribe, or give medical advice that is not explicitly in the `CONTEXT`.
-- NEVER ask for personal health information.
-"""
-SIMILARITY_THRESHOLD = 0.70
+class Message(BaseModel):
+    role: str
+    parts: List[Part]
 
-class handler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        # Helper function to send JSON responses
-        def send_json_response(status_code, content):
-            self.send_response(status_code)
-            self.send_header('Content-type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*') # Add CORS header
-            self.end_headers()
-            self.wfile.write(json.dumps(content).encode('utf-8'))
+class ChatRequest(BaseModel):
+    history: List[Message]
 
-        # --- 1. Initialize Langfuse ---
-        try:
-            langfuse = Langfuse(
-                secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
-                public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
-                host=os.getenv("LANGFUSE_HOST")
-            )
-        except Exception as e:
-            send_json_response(500, {"answer": f"Server Error: Could not initialize Langfuse. Check LANGFUSE environment variables. Error: {e}"})
-            return
+# --- FastAPI App Initialization ---
+# Vercel will find this 'app' object in this file.
+app = FastAPI()
 
-        # --- 2. Process Incoming Request ---
-        content_length = int(self.headers.get('Content-Length', 0))
-        post_data = self.rfile.read(content_length)
-        request_body = json.loads(post_data)
-        history = request_body.get('history', [])
-        user_query = history[-1]['parts'][0]['text'] if history else ""
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-        # --- 3. Create the Root Trace ---
-        trace = langfuse.trace(
-            name="rag-pipeline",
-            user_id="end-user-123", # This can be made dynamic later
-            input={"query": user_query}
-        )
+# --- Main Chat Endpoint ---
+# Because the app is in index.py, FastAPI can now correctly handle the full path.
+@app.post("/api/chat")
+async def handle_chat(chat_request: ChatRequest):
+    # This is where your full AI and LangFuse logic will go.
+    # For this final fix, we will return a simple success message
+    # to confirm the framework and routing are working.
 
-        try:
-            if not user_query:
-                send_json_response(200, {"answer": "Please type a message."})
-                return
+    history = [message.dict() for message in chat_request.history]
+    user_query = history[-1]['parts'][0]['text'] if history else ""
 
-            # --- 4. Initialize AI & DB Services ---
-            gemini_api_key = os.getenv("GEMINI_API_KEY")
-            pinecone_api_key = os.getenv("PINECONE_API_KEY")
-            pinecone_index_name = "physical-therapy-index"
-
-            if not all([gemini_api_key, pinecone_api_key]):
-                raise ValueError("Server Error: One or more API configuration variables are missing.")
-
-            pc = Pinecone(api_key=pinecone_api_key)
-            genai.configure(api_key=gemini_api_key)
-            index = pc.Index(pinecone_index_name)
-            model = genai.GenerativeModel('gemini-1.5-flash-latest')
-
-            # --- 5. RAG Pipeline with Langfuse Spans ---
-            retrieval_span = trace.span(name="retrieval", input={"query": user_query})
-            query_embedding = genai.embed_content(model="models/text-embedding-004", content=user_query, task_type="RETRIEVAL_QUERY")["embedding"]
-            search_results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
-
-            retrieved_docs = ""
-            if search_results['matches'] and search_results['matches'][0]['score'] >= SIMILARITY_THRESHOLD:
-                retrieved_docs = "\n".join([match['metadata']['text'] for match in search_results['matches']])
-
-            retrieval_span.end(output={"retrieved_docs": retrieved_docs})
-
-            generation_span = trace.span(name="generation", input={"history": history, "retrieved_docs": retrieved_docs})
-            chat_session = model.start_chat(history=history[:-1])
-            final_prompt = f"{SYSTEM_INSTRUCTION}\n\nCONTEXT:\n{retrieved_docs if retrieved_docs else 'No relevant documents were found.'}\n\nBased on the CONTEXT and conversation history, answer the user's latest message:\n{user_query}"
-
-            response = chat_session.send_message(final_prompt)
-            ai_answer = response.text
-            generation_span.end(output={"answer": ai_answer})
-
-            trace.update(output={"final_answer": ai_answer})
-
-        except Exception as e:
-            ai_answer = f"An error occurred: {e}"
-            trace.update(output={"error": ai_answer}, level="ERROR")
-            print(f"Error: {e}")
-
-        # --- 6. Send Final Response and Flush Langfuse ---
-        send_json_response(200, {"answer": ai_answer})
-        langfuse.flush()
-        return
+    return {"answer": f"Success! The FastAPI backend is connected and received: '{user_query}'"}
