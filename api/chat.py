@@ -1,10 +1,13 @@
+# api/chat.py
 import os
 import json
 from http.server import BaseHTTPRequestHandler
 from typing import List, Dict, Any
 import google.generativeai as genai
 from pinecone import Pinecone
+from langfuse import Langfuse # Import Langfuse
 
+# --- Constants and System Instructions (from your snippet) ---
 SYSTEM_INSTRUCTION = """
 You are "CliniBot," an expert AI assistant for a physical therapy clinic. Your persona is professional, knowledgeable, and empathetic.
 Your primary goal is to answer the user's question based on the provided `CONTEXT`.
@@ -19,6 +22,7 @@ SIMILARITY_THRESHOLD = 0.70
 
 class handler(BaseHTTPRequestHandler):
     def do_POST(self):
+        # Helper function to send JSON responses
         def send_json_response(status_code, content):
             self.send_response(status_code)
             self.send_header('Content-type', 'application/json')
@@ -26,6 +30,15 @@ class handler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(content).encode('utf-8'))
 
         try:
+            # --- 1. Initialize Langfuse ---
+            # Securely get LangFuse keys from environment variables
+            langfuse = Langfuse(
+                secret_key=os.getenv("sk-lf-80f208d4-9393-40cd-ba05-d3f80c2bc53b"),
+                public_key=os.getenv("pk-lf-a542df46-3a4e-4469-818e-100e1170cae5"),
+                host=os.getenv("https://us.cloud.langfuse.com")
+            )
+
+            # --- 2. Process Incoming Request ---
             content_length = int(self.headers.get('Content-Length', 0))
             post_data = self.rfile.read(content_length)
             request_body = json.loads(post_data)
@@ -36,25 +49,36 @@ class handler(BaseHTTPRequestHandler):
                 send_json_response(200, {"answer": "Please type a message."})
                 return
 
-            # --- THE FINAL FIX IS HERE ---
-            # Explicitly getting all necessary credentials from the environment
+            # --- 3. Create a Langfuse Trace for the entire RAG process ---
+            trace = langfuse.trace(
+                name="rag-pipeline",
+                user_id="end-user-123", # Replace with a real user ID in production
+                input={"query": user_query, "history_length": len(history)}
+            )
+
+            # --- 4. Initialize AI & DB Services ---
             gemini_api_key = os.getenv("GEMINI_API_KEY")
             pinecone_api_key = os.getenv("PINECONE_API_KEY")
-            pinecone_environment = os.getenv("PINECONE_ENVIRONMENT") # Get the environment
+            pinecone_environment = os.getenv("PINECONE_ENVIRONMENT")
             pinecone_index_name = "physical-therapy-index"
 
             if not all([gemini_api_key, pinecone_api_key, pinecone_environment]):
-                send_json_response(500, {"answer": "Server Error: One or more API configuration variables are missing."})
+                error_msg = "Server Error: One or more API configuration variables are missing."
+                trace.update(output={"error": error_msg}, level="ERROR")
+                send_json_response(500, {"answer": error_msg})
                 return
 
-            # Initialize Pinecone with the explicit environment
             pc = Pinecone(api_key=pinecone_api_key, environment=pinecone_environment)
-            
             genai.configure(api_key=gemini_api_key)
             index = pc.Index(pinecone_index_name)
             model = genai.GenerativeModel('gemini-1.5-flash-latest')
 
-            # --- RAG Pipeline (no changes) ---
+            # --- 5. RAG Pipeline with Langfuse Spans ---
+            # --- Retrieval Span ---
+            retrieval_span = trace.span(
+                name="retrieval",
+                input={"query": user_query}
+            )
             search_query = user_query
             query_embedding = genai.embed_content(model="models/text-embedding-004", content=search_query, task_type="RETRIEVAL_QUERY")["embedding"]
             search_results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
@@ -63,15 +87,38 @@ class handler(BaseHTTPRequestHandler):
             if search_results['matches'] and search_results['matches'][0]['score'] >= SIMILARITY_THRESHOLD:
                 retrieved_docs = "\n".join([match['metadata']['text'] for match in search_results['matches']])
             
-            formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg['content']}" for msg in history])
-            combined_context = f"CONVERSATIONAL HISTORY:\n{formatted_history}\n\nRELEVANT DOCUMENTS:\n{retrieved_docs if retrieved_docs else 'No relevant documents were found for this query.'}"
+            retrieval_span.end(output={
+                "retrieved_docs": retrieved_docs,
+                "pinecone_results": search_results['matches']
+            })
+            # --- End Retrieval Span ---
 
+            # --- Generation Span ---
+            generation_span = trace.span(
+                name="generation",
+                input={"history": history, "retrieved_docs": retrieved_docs}
+            )
+            formatted_history = "\n".join([f"{msg['role'].capitalize()}: {msg.get('content', '')}" for msg in history])
+            combined_context = f"CONVERSATIONAL HISTORY:\n{formatted_history}\n\nRELEVANT DOCUMENTS:\n{retrieved_docs if retrieved_docs else 'No relevant documents were found for this query.'}"
             final_prompt = f"{SYSTEM_INSTRUCTION}\n\nCONTEXT:\n{combined_context}\n\nBased on the CONTEXT, provide a direct and helpful answer to the user's latest message:\n{user_query}"
             
             response = model.generate_content(final_prompt)
             ai_answer = response.text
 
+            generation_span.end(output={"answer": ai_answer})
+            # --- End Generation Span ---
+
+            # Update the overall trace with the final output
+            trace.update(output={"final_answer": ai_answer})
+
         except Exception as e:
             ai_answer = f"An error occurred during the RAG process: {e}"
+            # If an error happens, we can also log it to the trace
+            if 'trace' in locals():
+                trace.update(output={"error": ai_answer}, level="ERROR")
+            print(f"Error: {e}") # Also print to Vercel logs for immediate debugging
 
+        # --- 6. Send Final Response ---
         send_json_response(200, {"answer": ai_answer})
+
+

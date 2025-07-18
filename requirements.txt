@@ -1,4 +1,3 @@
-# requirements.txt
 google-generativeai
-pinecone>=4.0.0
-python-dotenv
+pinecone-client
+langfuse
