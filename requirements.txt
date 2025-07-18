@@ -1,6 +1,3 @@
-fastapi
-uvicorn
-pydantic
 google-generativeai
-pinecone
+pinecone-client
 langfuse
