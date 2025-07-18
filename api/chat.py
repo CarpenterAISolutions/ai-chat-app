@@ -39,7 +39,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Main ChChChChat Endpoint ---
+# --- Main Chat Endpoint ---
 # Because the file is named chat.py, Vercel routes /api/chat here.
 # The "@app.post('/')" tells FastAPI to handle the request at the root of this file.
 @app.post("/")
