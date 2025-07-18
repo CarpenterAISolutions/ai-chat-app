@@ -45,8 +45,6 @@ app.add_middleware(
 @app.post("/")
 async def handle_chat(chat_request: ChatRequest):
     # --- 1. Securely Initialize ALL Services ---
-    # ** THE FIX IS HERE **
-    # We now check for ALL keys before initializing anything.
     try:
         gemini_api_key = os.getenv("GEMINI_API_KEY")
         pinecone_api_key = os.getenv("PINECONE_API_KEY")
@@ -58,7 +56,6 @@ async def handle_chat(chat_request: ChatRequest):
         if not all([gemini_api_key, pinecone_api_key, langfuse_secret_key, langfuse_public_key, langfuse_host]):
             raise HTTPException(status_code=500, detail="Server Configuration Error: One or more API keys (GEMINI, PINECONE, or LANGFUSE) are not set in the Vercel environment.")
 
-        # Initialize clients AFTER confirming keys exist.
         genai.configure(api_key=gemini_api_key)
         pc = Pinecone(api_key=pinecone_api_key)
         langfuse = Langfuse(secret_key=langfuse_secret_key, public_key=langfuse_public_key, host=langfuse_host)
