@@ -24,7 +24,6 @@ class ChatRequest(BaseModel):
 app = FastAPI()
 
 # --- Master Error Handler ---
-# This is the most important fix. It catches ANY error and ensures a clean JSON response.
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
     return JSONResponse(
@@ -41,9 +40,9 @@ app.add_middleware(
 )
 
 # --- Main Chat Endpoint ---
-# Because the file is named chat.py, Vercel routes /api/chat here.
-# The "@app.post('/')" tells FastAPI to handle the request at the root of this file.
-@app.post("/")
+# ** THE FIX IS HERE **
+# The path is now correctly set to /api/chat to match the frontend.
+@app.post("/api/chat")
 async def handle_chat(chat_request: ChatRequest):
     # The logic from before, now protected by the master error handler.
     langfuse = Langfuse(
@@ -94,5 +93,4 @@ async def handle_chat(chat_request: ChatRequest):
         error_message = f"An error occurred: {e}"
         trace.update(output={"error": error_message}, level="ERROR")
         langfuse.flush()
-        # This ensures even caught errors are sent back as proper HTTP exceptions
         raise HTTPException(status_code=500, detail=error_message)
