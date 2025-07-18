@@ -9,27 +9,19 @@ from pinecone import Pinecone
 from langfuse import Langfuse
 from typing import List, Dict, Any
 
-# --- Pydantic Models for Robust Data Validation ---
 class Part(BaseModel):
     text: str
-
 class Message(BaseModel):
     role: str
     parts: List[Part]
-
 class ChatRequest(BaseModel):
     history: List[Message]
 
-# --- FastAPI App Initialization ---
 app = FastAPI()
 
-# --- Master Error Handler ---
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
-    return JSONResponse(
-        status_code=500,
-        content={"detail": f"An unexpected server error occurred: {exc}"},
-    )
+    return JSONResponse(status_code=500, content={"detail": f"An unexpected server error occurred: {exc}"})
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,12 +31,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Main Chat Endpoint ---
-# Because the file is named chat.py, Vercel routes /api/chat here.
-# The "@app.post('/')" tells FastAPI to handle the request at the root of this file.
 @app.post("/")
 async def handle_chat(chat_request: ChatRequest):
-    # --- 1. Securely Initialize ALL Services ---
     try:
         gemini_api_key = os.getenv("GEMINI_API_KEY")
         pinecone_api_key = os.getenv("PINECONE_API_KEY")
@@ -54,7 +42,7 @@ async def handle_chat(chat_request: ChatRequest):
         pinecone_index_name = "physical-therapy-index"
 
         if not all([gemini_api_key, pinecone_api_key, langfuse_secret_key, langfuse_public_key, langfuse_host]):
-            raise HTTPException(status_code=500, detail="Server Configuration Error: One or more API keys (GEMINI, PINECONE, or LANGFUSE) are not set in the Vercel environment.")
+            raise HTTPException(status_code=500, detail="Server Configuration Error: One or more API keys are not set.")
 
         genai.configure(api_key=gemini_api_key)
         pc = Pinecone(api_key=pinecone_api_key)
@@ -69,20 +57,17 @@ async def handle_chat(chat_request: ChatRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Initialization Error: {str(e)}")
 
-    # --- 2. Safely Extract History and Latest Query ---
     history = [message.dict() for message in chat_request.history]
     user_query = history[-1]['parts'][0]['text'] if history else ""
     trace = langfuse.trace(name="rag-pipeline", user_id="end-user-123", input={"query": user_query})
 
     try:
-        # --- 3. Perform RAG Search ---
         retrieval_span = trace.span(name="retrieval", input={"query": user_query})
         query_embedding = genai.embed_content(model="models/text-embedding-004", content=user_query, task_type="RETRIEVAL_QUERY")["embedding"]
         search_results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
         context = " ".join([match['metadata']['text'] for match in search_results['matches']])
         retrieval_span.end(output={"retrieved_context": context})
 
-        # --- 4. Generate Conversational Response ---
         generation_span = trace.span(name="generation", input={"history": history, "context": context})
         chat_session = model.start_chat(history=history[:-1])
         final_prompt = f"Based on the following context: '{context}', and our previous conversation, answer the user's latest question: '{user_query}'"

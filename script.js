@@ -7,7 +7,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const BACKEND_URL = '/api/chat';
 
-    // This is the "memory" for the conversation.
     let conversationHistory = [];
 
     chatForm.addEventListener('submit', async (event) => {
@@ -16,35 +15,29 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!userMessage) return;
 
         addMessage(userMessage, 'user');
-        // Add the user's message to the history in the correct format.
         conversationHistory.push({ role: 'user', parts: [{ text: userMessage }] });
 
         userInput.value = '';
         loadingSpinner.classList.remove('hidden');
 
         try {
-            // Send the entire history to the backend.
             const response = await fetch(BACKEND_URL, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                // The body now sends the 'history' object, which matches the backend.
                 body: JSON.stringify({ history: conversationHistory })
             });
 
             const data = await response.json();
 
             if (!response.ok) {
-                // The backend now sends specific errors in a 'detail' key.
                 throw new Error(data.detail || 'An unknown error occurred.');
             }
 
             addMessage(data.answer, 'ai');
-            // Add the AI's response to the history to continue the conversation.
             conversationHistory.push({ role: 'model', parts: [{ text: data.answer }] });
 
         } catch (error) {
             console.error('Fetch Error:', error);
-            // Display the specific error message from the backend.
             addMessage(`Error: ${error.message}`, 'ai');
         } finally {
             loadingSpinner.classList.add('hidden');
