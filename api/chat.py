@@ -1,9 +1,9 @@
 import os
 import json
 from http.server import BaseHTTPRequestHandler
-from pinecone import Pinecone  # Add this import for Pinecone client
-from langfuse import Langfuse  # Import Langfuse client
-import google.generativeai as genai  # Import genai for Gemini API
+from pinecone import Pinecone  # type: ignore # Add this import for Pinecone client
+from langfuse import Langfuse  # type: ignore # Import Langfuse client
+import google.generativeai as genai  # type: ignore # Import genai for Gemini API
 # ...existing code...
 # --- Constants and System Instructions ---
 SYSTEM_INSTRUCTION = """
@@ -27,17 +27,13 @@ class handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(content).encode('utf-8'))
 
-        try:
-            # --- 1. Initialize Langfuse ---
-            # Securely get LangFuse keys from environment variables
-            langfuse = Langfuse(
-                secret_key=os.getenv("sk-lf-80f208d4-9393-40cd-ba05-d3f80c2bc53b"),
-                public_key=os.getenv("pk-lf-a542df46-3a4e-4469-818e-100e1170cae5"),
-                host=os.getenv("https://us.cloud.langfuse.com")
-            )
-        except Exception as e:
-            send_json_response(500, {"answer": f"Server Error: Could not initialize Langfuse. {e}"})
-            return
+        # --- 1. Initialize Langfuse ---
+        # Securely get LangFuse keys from environment variables
+        langfuse = Langfuse(
+            secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
+            public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
+            host=os.getenv("LANGFUSE_PUBLIC_KEY")
+        )
 
         # --- Process Incoming Request ---
         content_length = int(self.headers.get('Content-Length', 0))
