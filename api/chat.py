@@ -1,6 +1,5 @@
 # api/index.py
 import os
-import json
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,9 +20,7 @@ class ChatRequest(BaseModel):
     history: List[Message]
 
 # --- FastAPI App Initialization ---
-# Vercel will find this 'app' object in this file.
 app = FastAPI()
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -33,14 +30,62 @@ app.add_middleware(
 )
 
 # --- Main Chat Endpoint ---
-# Because the app is in index.py, FastAPI can now correctly handle the full path.
 @app.post("/api/chat")
 async def handle_chat(chat_request: ChatRequest):
-    # This is where your full AI and LangFuse logic will go.
-    # For this final fix, we will return a simple success message
-    # to confirm the framework and routing are working.
+    # --- 1. Initialize Langfuse ---
+    try:
+        langfuse = Langfuse(
+            secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
+            public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
+            host=os.getenv("LANGFUSE_HOST")
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Langfuse Initialization Error: {e}")
 
+    # --- 2. Process Incoming Request ---
     history = [message.dict() for message in chat_request.history]
     user_query = history[-1]['parts'][0]['text'] if history else ""
 
-    return {"answer": f"Success! The FastAPI backend is connected and received: '{user_query}'"}
+    trace = langfuse.trace(name="rag-pipeline", user_id="end-user-123", input={"query": user_query})
+
+    try:
+        # --- 3. Initialize AI & DB Services ---
+        gemini_api_key = os.getenv("GEMINI_API_KEY")
+        pinecone_api_key = os.getenv("PINECONE_API_KEY")
+        pinecone_index_name = "physical-therapy-index"
+
+        if not all([gemini_api_key, pinecone_api_key]):
+            raise ValueError("Server Error: GEMINI or PINECONE API keys are missing.")
+
+        genai.configure(api_key=gemini_api_key)
+        pc = Pinecone(api_key=pinecone_api_key)
+
+        if pinecone_index_name not in pc.list_indexes().names():
+            raise HTTPException(status_code=500, detail="Knowledge Base Error: Pinecone index not found.")
+
+        index = pc.Index(pinecone_index_name)
+        model = genai.GenerativeModel('gemini-1.5-flash-latest')
+
+        # --- 4. RAG Pipeline with Langfuse Spans ---
+        retrieval_span = trace.span(name="retrieval", input={"query": user_query})
+        query_embedding = genai.embed_content(model="models/text-embedding-004", content=user_query, task_type="RETRIEVAL_QUERY")["embedding"]
+        search_results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
+        context = " ".join([match['metadata']['text'] for match in search_results['matches']])
+        retrieval_span.end(output={"retrieved_context": context})
+
+        generation_span = trace.span(name="generation", input={"history": history, "context": context})
+        chat_session = model.start_chat(history=history[:-1])
+        final_prompt = f"Based on the following context: '{context}', and our previous conversation, answer the user's latest question: '{user_query}'"
+        response = chat_session.send_message(final_prompt)
+        ai_answer = response.text
+        generation_span.end(output={"answer": ai_answer})
+
+        trace.update(output={"final_answer": ai_answer})
+        langfuse.flush()
+        return {"answer": ai_answer}
+
+    except Exception as e:
+        error_message = f"An error occurred: {e}"
+        trace.update(output={"error": error_message}, level="ERROR")
+        langfuse.flush()
+        raise HTTPException(status_code=500, detail=error_message)
