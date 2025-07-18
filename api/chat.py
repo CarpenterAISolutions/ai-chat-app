@@ -1,4 +1,10 @@
-
+import os
+import json
+from http.server import BaseHTTPRequestHandler
+from pinecone import Pinecone  # Add this import for Pinecone client
+from langfuse import Langfuse  # Import Langfuse client
+import google.generativeai as genai  # Import genai for Gemini API
+# ...existing code...
 # --- Constants and System Instructions ---
 SYSTEM_INSTRUCTION = """
 You are "CliniBot," an expert AI assistant for a physical therapy clinic. Your persona is professional, knowledgeable, and empathetic.
@@ -20,6 +26,7 @@ class handler(BaseHTTPRequestHandler):
             self.send_header('Content-type', 'application/json')
             self.end_headers()
             self.wfile.write(json.dumps(content).encode('utf-8'))
+
         try:
             # --- 1. Initialize Langfuse ---
             # Securely get LangFuse keys from environment variables
@@ -28,7 +35,7 @@ class handler(BaseHTTPRequestHandler):
                 public_key=os.getenv("pk-lf-a542df46-3a4e-4469-818e-100e1170cae5"),
                 host=os.getenv("https://us.cloud.langfuse.com")
             )
-except Exception as e:
+        except Exception as e:
             send_json_response(500, {"answer": f"Server Error: Could not initialize Langfuse. {e}"})
             return
 
