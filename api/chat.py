@@ -1,6 +1,7 @@
-# api/index.py
+# api/chat.py
 import os
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import google.generativeai as genai
@@ -21,6 +22,16 @@ class ChatRequest(BaseModel):
 
 # --- FastAPI App Initialization ---
 app = FastAPI()
+
+# --- Master Error Handler ---
+# This is the most important fix. It catches ANY error and ensures a clean JSON response.
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"An unexpected server error occurred: {exc}"},
+    )
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -30,26 +41,22 @@ app.add_middleware(
 )
 
 # --- Main Chat Endpoint ---
-@app.post("/api/chat")
+# Because the file is named chat.py, Vercel routes /api/chat here.
+# The "@app.post('/')" tells FastAPI to handle the request at the root of this file.
+@app.post("/")
 async def handle_chat(chat_request: ChatRequest):
-    # --- 1. Initialize Langfuse ---
-    try:
-        langfuse = Langfuse(
-            secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
-            public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
-            host=os.getenv("LANGFUSE_HOST")
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Langfuse Initialization Error: {e}")
+    # The logic from before, now protected by the master error handler.
+    langfuse = Langfuse(
+        secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
+        public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
+        host=os.getenv("LANGFUSE_HOST")
+    )
 
-    # --- 2. Process Incoming Request ---
     history = [message.dict() for message in chat_request.history]
     user_query = history[-1]['parts'][0]['text'] if history else ""
-
     trace = langfuse.trace(name="rag-pipeline", user_id="end-user-123", input={"query": user_query})
 
     try:
-        # --- 3. Initialize AI & DB Services ---
         gemini_api_key = os.getenv("GEMINI_API_KEY")
         pinecone_api_key = os.getenv("PINECONE_API_KEY")
         pinecone_index_name = "physical-therapy-index"
@@ -66,7 +73,6 @@ async def handle_chat(chat_request: ChatRequest):
         index = pc.Index(pinecone_index_name)
         model = genai.GenerativeModel('gemini-1.5-flash-latest')
 
-        # --- 4. RAG Pipeline with Langfuse Spans ---
         retrieval_span = trace.span(name="retrieval", input={"query": user_query})
         query_embedding = genai.embed_content(model="models/text-embedding-004", content=user_query, task_type="RETRIEVAL_QUERY")["embedding"]
         search_results = index.query(vector=query_embedding, top_k=3, include_metadata=True)
@@ -88,4 +94,5 @@ async def handle_chat(chat_request: ChatRequest):
         error_message = f"An error occurred: {e}"
         trace.update(output={"error": error_message}, level="ERROR")
         langfuse.flush()
+        # This ensures even caught errors are sent back as proper HTTP exceptions
         raise HTTPException(status_code=500, detail=error_message)
