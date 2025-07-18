@@ -1,4 +1,4 @@
-# api/index.py
+# api/chat.py
 import os
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
@@ -40,7 +40,9 @@ app.add_middleware(
 )
 
 # --- Main Chat Endpoint ---
-@app.post("/api/chat")
+# Because the file is named chat.py, Vercel routes /api/chat here.
+# The "@app.post('/')" tells FastAPI to handle the request at the root of this file.
+@app.post("/")
 async def handle_chat(chat_request: ChatRequest):
     # --- 1. Securely Initialize ALL Services ---
     # ** THE FIX IS HERE **
